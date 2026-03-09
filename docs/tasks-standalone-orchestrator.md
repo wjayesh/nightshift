@@ -36,17 +36,20 @@ Clarify the standalone repo's mission, value add over Symphony, non-goals, and a
 ### 0.2 Define repo structure
 
 - **ID**: `ORCH-002`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-001
+- **Notes**:
+  - 2026-03-09: Defined the target extracted repo layout in `docs/standalone-orchestrator-repo-structure.md` around a single core module, a thin CLI, repo-owned workflow/docs, and a generic `.orchestrator/` runtime directory.
+  - 2026-03-09: Validation passed with `node node_modules/prettier/bin/prettier.cjs --check docs/standalone-orchestrator-repo-structure.md docs/tasks-standalone-orchestrator.md`.
 
 Choose the minimal file and folder layout for the standalone repo.
 
 **Acceptance Criteria**
 
-- [ ] Repo structure is documented
-- [ ] Core files are identified
-- [ ] Copy-into-project usage is supported by the structure
+- [x] Repo structure is documented
+- [x] Core files are identified
+- [x] Copy-into-project usage is supported by the structure
 
 ## Phase 1 - Extraction
 

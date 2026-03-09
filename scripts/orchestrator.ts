@@ -215,6 +215,51 @@ function integrateTerminalTask(params: {
     throw new Error(`${task.id} ${commitVerb} auto-commit failed in task branch: ${commitResult.error}`);
   }
 
+  const currentWorkspaceBranch = getCurrentBranch(workspace.path);
+  if (workspace.kind === "shared" && currentWorkspaceBranch === integrationBranch) {
+    const refreshedActionableTasks = loadTasks(repoRoot, workflow.taskSources);
+    const refreshedTask = findTaskById(refreshedActionableTasks, task.id);
+    const terminalLabel = terminalStatus === "completed" ? "completed" : "blocked";
+
+    if (terminalStatus === "completed" && refreshedTask?.status !== "done") {
+      throw new Error(`${task.id} committed directly on ${integrationBranch} but root task status is not done.`);
+    }
+    if (terminalStatus === "blocked" && refreshedTask?.status !== "blocked") {
+      throw new Error(
+        `${task.id} committed directly on ${integrationBranch} but root task status is not blocked.`,
+      );
+    }
+
+    let historyNote = commitResult.committed
+      ? `${task.id} ${terminalLabel} and committed directly on ${integrationBranch}${
+          commitResult.commitSha ? ` as ${commitResult.commitSha}` : ""
+        }.`
+      : `${task.id} already reflected on ${integrationBranch}; no direct commit needed.`;
+
+    if (commitResult.committed) {
+      state.commitsSincePush += 1;
+      state.lastCommittedTaskId = task.id;
+      state.lastCommitSha = commitResult.commitSha;
+    }
+
+    const shouldPush =
+      workflow.autoPushEveryCommits > 0 &&
+      state.commitsSincePush > 0 &&
+      (state.commitsSincePush >= workflow.autoPushEveryCommits ||
+        areAllTasksComplete(refreshedActionableTasks));
+
+    if (shouldPush) {
+      const pushResult = maybePushBranch(repoRoot, integrationBranch, state.commitsSincePush, true);
+      if (pushResult.error) {
+        throw new Error(`${historyNote} Auto-push failed: ${pushResult.error}`);
+      }
+      state.commitsSincePush = 0;
+      historyNote = `${historyNote} Pushed ${integrationBranch}.`;
+    }
+
+    return { historyNote, refreshedActionableTasks };
+  }
+
   const lockPath = acquireRepoLock(repoRoot, workflow.name, task.id);
   try {
     const uniqueCommits = listUniqueCommits(workspace.path, integrationBranch);
