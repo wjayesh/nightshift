@@ -118,6 +118,26 @@ function runLoop(
   return { exitCode, logs, errors };
 }
 
+function createTaskWorktree(repoRoot: string, taskId = "TASK-001") {
+  const workspacePath = join(
+    repoRoot,
+    ".orchestrator/workspaces",
+    taskId.toLowerCase(),
+  );
+  const branchName = `orchestrator-${taskId.toLowerCase()}`;
+  expect(
+    runGit(repoRoot, [
+      "worktree",
+      "add",
+      "-B",
+      branchName,
+      workspacePath,
+      "main",
+    ]).status,
+  ).toBe(0);
+  return { workspacePath, branchName };
+}
+
 function readState(repoRoot: string) {
   return JSON.parse(
     readFileSync(join(repoRoot, ".orchestrator/state.json"), "utf8"),
@@ -131,6 +151,8 @@ function readState(repoRoot: string) {
         lastFailureNote: string;
         lastBackoffSeconds: number;
         nextRetryAt: string | null;
+        staleWorkspace: boolean;
+        staleWorkspaceReason: string | null;
       }
     >;
     history: Array<{ status: string; note: string }>;
@@ -280,6 +302,204 @@ if (outputPath) {
       lastBackoffSeconds: 7,
     });
     expect(state.history[0]?.status).toBe("retry_scheduled");
+  });
+
+  it("refreshes stale conflict workspaces from the latest integration branch before rerunning", () => {
+    const repoRoot = createRepo({
+      agentSource: `const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+
+let workspace = process.cwd();
+let outputPath = null;
+
+for (let index = 2; index < process.argv.length; index += 1) {
+  const arg = process.argv[index];
+  if (arg === "-C" && process.argv[index + 1]) {
+    workspace = process.argv[index + 1];
+    index += 1;
+    continue;
+  }
+  if (arg === "-o" && process.argv[index + 1]) {
+    outputPath = process.argv[index + 1];
+    index += 1;
+  }
+}
+
+const counterPath = path.join(process.cwd(), ".orchestrator/agent-runs-total");
+const runs =
+  Number(fs.existsSync(counterPath) ? fs.readFileSync(counterPath, "utf8") : "0") + 1;
+fs.mkdirSync(path.dirname(counterPath), { recursive: true });
+fs.writeFileSync(counterPath, String(runs));
+
+const workspaceHead = spawnSync("git", ["rev-parse", "HEAD"], {
+  cwd: workspace,
+  encoding: "utf8",
+}).stdout.trim();
+fs.writeFileSync(
+  path.join(process.cwd(), ".orchestrator/workspace-head-" + runs),
+  workspaceHead + "\\n",
+);
+
+if (runs >= 2) {
+  fs.writeFileSync(path.join(workspace, "notes.txt"), "integration moved\\nrerun change\\n");
+}
+
+if (outputPath) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(
+    outputPath,
+    "TASK_DONE " + process.env.ORCHESTRATOR_TASK_ID + "\\nRecovered after workspace refresh.\\n",
+  );
+}
+`,
+      workspaceMode: "git_worktree",
+    });
+    const { workspacePath } = createTaskWorktree(repoRoot);
+
+    writeFileSync(
+      join(workspacePath, "notes.txt"),
+      "stale task branch change\n",
+    );
+    expect(runGit(workspacePath, ["add", "notes.txt"]).status).toBe(0);
+    expect(
+      runGit(workspacePath, ["commit", "-m", "stale task seed"]).status,
+    ).toBe(0);
+    const staleWorkspaceHead = runGit(workspacePath, [
+      "rev-parse",
+      "HEAD",
+    ]).stdout.trim();
+
+    writeFileSync(join(repoRoot, "notes.txt"), "integration moved\n");
+    expect(
+      runGit(repoRoot, ["commit", "-am", "integration moved notes"]).status,
+    ).toBe(0);
+    const latestIntegrationHead = runGit(repoRoot, [
+      "rev-parse",
+      "HEAD",
+    ]).stdout.trim();
+
+    const result = runLoop(repoRoot, { maxIterations: 2 });
+    const state = readState(repoRoot);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(
+      readFileSync(join(repoRoot, ".orchestrator/agent-runs-total"), "utf8"),
+    ).toBe("2");
+    expect(state.taskFailures).toEqual({});
+    expect(state.history.map((entry) => entry.status)).toEqual([
+      "retry_scheduled",
+      "completed",
+    ]);
+    expect(state.history[0]?.note).toContain("workspace is marked stale");
+    expect(
+      readFileSync(
+        join(repoRoot, ".orchestrator/workspace-head-1"),
+        "utf8",
+      ).trim(),
+    ).toBe(staleWorkspaceHead);
+    expect(
+      readFileSync(
+        join(repoRoot, ".orchestrator/workspace-head-2"),
+        "utf8",
+      ).trim(),
+    ).toBe(latestIntegrationHead);
+    expect(readFileSync(join(repoRoot, "docs/tasks.md"), "utf8")).toContain(
+      "- **Status**: `done`",
+    );
+    expect(readFileSync(join(workspacePath, "notes.txt"), "utf8")).toBe(
+      "integration moved\nrerun change\n",
+    );
+    expect(runGit(workspacePath, ["log", "--format=%s"]).stdout).not.toContain(
+      "stale task seed",
+    );
+  });
+
+  it("refreshes idle clean git worktrees when the integration branch moves forward", () => {
+    const repoRoot = createRepo({
+      agentSource: `const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+
+let workspace = process.cwd();
+let outputPath = null;
+
+for (let index = 2; index < process.argv.length; index += 1) {
+  const arg = process.argv[index];
+  if (arg === "-C" && process.argv[index + 1]) {
+    workspace = process.argv[index + 1];
+    index += 1;
+    continue;
+  }
+  if (arg === "-o" && process.argv[index + 1]) {
+    outputPath = process.argv[index + 1];
+    index += 1;
+  }
+}
+
+const workspaceHead = spawnSync("git", ["rev-parse", "HEAD"], {
+  cwd: workspace,
+  encoding: "utf8",
+}).stdout.trim();
+const selectedHeadPath = path.join(
+  process.cwd(),
+  ".orchestrator/selected-workspace-head",
+);
+fs.mkdirSync(path.dirname(selectedHeadPath), { recursive: true });
+fs.writeFileSync(selectedHeadPath, workspaceHead + "\\n");
+fs.writeFileSync(path.join(workspace, "task.txt"), "fresh task change\\n");
+
+if (outputPath) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(
+    outputPath,
+    "TASK_DONE " + process.env.ORCHESTRATOR_TASK_ID + "\\nUsed refreshed base.\\n",
+  );
+}
+`,
+      workspaceMode: "git_worktree",
+    });
+    const { workspacePath } = createTaskWorktree(repoRoot);
+    const originalWorkspaceHead = runGit(workspacePath, [
+      "rev-parse",
+      "HEAD",
+    ]).stdout.trim();
+
+    writeFileSync(
+      join(repoRoot, "notes.txt"),
+      "tracked note\nintegration moved cleanly\n",
+    );
+    expect(
+      runGit(repoRoot, ["commit", "-am", "integration advanced"]).status,
+    ).toBe(0);
+    const latestIntegrationHead = runGit(repoRoot, [
+      "rev-parse",
+      "HEAD",
+    ]).stdout.trim();
+
+    const result = runLoop(repoRoot, { once: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(
+      readFileSync(
+        join(repoRoot, ".orchestrator/selected-workspace-head"),
+        "utf8",
+      ).trim(),
+    ).toBe(latestIntegrationHead);
+    expect(
+      readFileSync(
+        join(repoRoot, ".orchestrator/selected-workspace-head"),
+        "utf8",
+      ).trim(),
+    ).not.toBe(originalWorkspaceHead);
+    expect(readFileSync(join(repoRoot, "docs/tasks.md"), "utf8")).toContain(
+      "- **Status**: `done`",
+    );
+    expect(readFileSync(join(workspacePath, "task.txt"), "utf8")).toBe(
+      "fresh task change\n",
+    );
   });
 
   it("stops auto-rerunning a task after the retry limit is exhausted", () => {

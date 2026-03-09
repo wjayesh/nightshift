@@ -371,7 +371,7 @@ Keep runtime, agent, and integration failures from killing the whole loop on the
 ### 4.3a Refresh stale task workspaces and recover from conflict
 
 - **ID**: `ORCH-047`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-042, ORCH-046
 - **Notes**:
@@ -433,3 +433,24 @@ Provide an optional macOS `launchd` installer without making it a core requireme
 - [ ] Generated plist content captures the required `PATH` and `HOME`
 - [ ] Install and uninstall docs exist for macOS operators
 - [ ] Non-macOS workflows remain unaffected
+
+## Phase 5 - End-to-End Validation
+
+### 5.1 Dogfood the standalone orchestrator end to end
+
+- **ID**: `ORCH-048`
+- **Status**: `pending`
+- **Priority**: P1
+- **Depends on**: ORCH-031, ORCH-032
+- **Notes**:
+  - 2026-03-10: Added after the hardening sprint so the orchestrator validates itself against a realistic multi-task fixture instead of stopping at unit coverage.
+
+Run the standalone orchestrator against a realistic, dependency-heavy fixture to validate the full operator flow and capture any bugs as follow-up tasks.
+
+**Acceptance Criteria**
+
+- [ ] The dogfood run uses a non-trivial fixture with multiple tasks, dependencies, and at least one review cycle
+- [ ] The run exercises decision logging plus runtime artifacts (`progress`, `state`, heartbeat/status, and last-message files where applicable)
+- [ ] The run verifies retry/backoff and stale-workspace recovery behavior at least once through a controlled fixture or fault injection
+- [ ] Bugs or workflow gaps found during the run are written back as follow-up tasks with clear reproduction notes
+- [ ] Operator-facing notes summarize what worked, what failed, and what still needs manual validation

@@ -86,6 +86,8 @@ export type OrchestratorTaskFailureRecord = {
   lastFailureNote: string;
   lastBackoffSeconds: number;
   nextRetryAt: string | null;
+  staleWorkspace: boolean;
+  staleWorkspaceReason: string | null;
 };
 
 export type OrchestratorReviewRecord = {
@@ -708,6 +710,11 @@ function normalizeTaskFailures(
           : 0,
       nextRetryAt:
         typeof entry.nextRetryAt === "string" ? entry.nextRetryAt : null,
+      staleWorkspace: entry.staleWorkspace === true,
+      staleWorkspaceReason:
+        typeof entry.staleWorkspaceReason === "string"
+          ? entry.staleWorkspaceReason
+          : null,
     };
   }
 
@@ -818,6 +825,101 @@ export function previewWorkspacePath(
   );
 }
 
+function createGitWorktree(
+  repoRoot: string,
+  workspacePath: string,
+  branchName: string,
+  baseRef: string,
+  taskId: string,
+) {
+  const result = runGit(
+    ["worktree", "add", "-B", branchName, workspacePath, baseRef],
+    repoRoot,
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `Failed to create git worktree for ${taskId}: ${gitError(result, "git worktree add failed")}`,
+    );
+  }
+}
+
+function removeGitWorktree(
+  repoRoot: string,
+  workspacePath: string,
+  taskId: string,
+) {
+  if (!existsSync(workspacePath)) {
+    return;
+  }
+
+  const removeResult = runGit(
+    ["worktree", "remove", "--force", workspacePath],
+    repoRoot,
+  );
+  if (removeResult.status !== 0) {
+    throw new Error(
+      `Failed to remove git worktree for ${taskId}: ${gitError(removeResult, "git worktree remove failed")}`,
+    );
+  }
+
+  const pruneResult = runGit(["worktree", "prune"], repoRoot);
+  if (pruneResult.status !== 0) {
+    throw new Error(
+      `Failed to prune git worktrees after removing ${taskId}: ${gitError(pruneResult, "git worktree prune failed")}`,
+    );
+  }
+}
+
+function resolveIntegrationBranch(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "requiredBranch">,
+) {
+  return config.requiredBranch ?? getCurrentBranch(repoRoot);
+}
+
+function shouldRefreshIdleTaskWorkspace(
+  repoRoot: string,
+  workspacePath: string,
+  integrationBranch: string,
+) {
+  if (!existsSync(workspacePath)) {
+    return false;
+  }
+
+  if (listDirtyCheckoutEntries(workspacePath).length > 0) {
+    return false;
+  }
+
+  if (listUniqueCommits(workspacePath, integrationBranch).length > 0) {
+    return false;
+  }
+
+  const workspaceHead = getHeadCommit(workspacePath);
+  const integrationHead = getHeadCommit(repoRoot);
+  return (
+    !!workspaceHead && !!integrationHead && workspaceHead !== integrationHead
+  );
+}
+
+function refreshTaskWorkspace(
+  repoRoot: string,
+  config: WorkflowConfig,
+  task: Task,
+  integrationBranch: string,
+) {
+  const workspacePath = previewWorkspacePath(repoRoot, config, task);
+  const branchName = sanitizeBranchName(task.id);
+  ensureDirectory(dirname(workspacePath));
+  removeGitWorktree(repoRoot, workspacePath, task.id);
+  createGitWorktree(
+    repoRoot,
+    workspacePath,
+    branchName,
+    integrationBranch,
+    task.id,
+  );
+}
+
 export function ensureWorkspace(
   repoRoot: string,
   config: WorkflowConfig,
@@ -837,18 +939,49 @@ export function ensureWorkspace(
 
   if (!existsSync(workspacePath)) {
     const baseRef = config.requiredBranch ?? "HEAD";
-    const result = runGit(
-      ["worktree", "add", "-B", branchName, workspacePath, baseRef],
-      repoRoot,
-    );
-    if (result.status !== 0) {
-      throw new Error(
-        `Failed to create git worktree for ${task.id}: ${gitError(result, "git worktree add failed")}`,
-      );
-    }
+    createGitWorktree(repoRoot, workspacePath, branchName, baseRef, task.id);
   }
 
   return { path: workspacePath, kind: "git_worktree", branchName };
+}
+
+function ensureTaskWorkspace(
+  repoRoot: string,
+  config: WorkflowConfig,
+  task: Task,
+  state: Pick<OrchestratorState, "taskFailures">,
+): WorkspaceHandle {
+  if (config.workspaceMode === "shared") {
+    return ensureWorkspace(repoRoot, config, task);
+  }
+
+  const integrationBranch = resolveIntegrationBranch(repoRoot, config);
+  if (!integrationBranch) {
+    throw new Error(
+      `Could not determine the integration branch for ${task.id} workspace refresh.`,
+    );
+  }
+
+  const taskFailure = getTaskFailureRecord(state, task.id);
+  const workspacePath = previewWorkspacePath(repoRoot, config, task);
+  let refreshedStaleWorkspace = false;
+
+  if (taskFailure?.staleWorkspace) {
+    if (existsSync(workspacePath)) {
+      refreshTaskWorkspace(repoRoot, config, task, integrationBranch);
+    }
+    refreshedStaleWorkspace = true;
+  } else if (
+    shouldRefreshIdleTaskWorkspace(repoRoot, workspacePath, integrationBranch)
+  ) {
+    refreshTaskWorkspace(repoRoot, config, task, integrationBranch);
+  }
+
+  const workspace = ensureWorkspace(repoRoot, config, task);
+  if (refreshedStaleWorkspace) {
+    clearTaskWorkspaceStale(state, task.id);
+  }
+  return workspace;
 }
 
 export function buildTaskPrompt(
@@ -1134,7 +1267,15 @@ export type CherryPickResult = {
   commitCount: number;
   lastCommitSha: string | null;
   error: string | null;
+  contentConflict: boolean;
 };
+
+class WorkspaceRefreshRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceRefreshRequiredError";
+  }
+}
 
 function getLastMessagePath(
   repoRoot: string,
@@ -1424,12 +1565,27 @@ function recordTerminalTaskStatusOnIntegrationBranch(params: {
   });
 }
 
+function isCherryPickContentConflict(result: ReturnType<typeof runGit>) {
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.toLowerCase();
+  return (
+    output.includes("conflict (") ||
+    output.includes("merge conflict") ||
+    output.includes("could not apply")
+  );
+}
+
 export function cherryPickCommits(
   repoRoot: string,
   commits: string[],
 ): CherryPickResult {
   if (commits.length === 0) {
-    return { applied: false, commitCount: 0, lastCommitSha: null, error: null };
+    return {
+      applied: false,
+      commitCount: 0,
+      lastCommitSha: null,
+      error: null,
+      contentConflict: false,
+    };
   }
 
   let appliedCount = 0;
@@ -1447,6 +1603,7 @@ export function cherryPickCommits(
           cherryPickResult,
           `git cherry-pick failed for ${commit}`,
         ),
+        contentConflict: isCherryPickContentConflict(cherryPickResult),
       };
     }
 
@@ -1459,6 +1616,7 @@ export function cherryPickCommits(
     commitCount: appliedCount,
     lastCommitSha,
     error: null,
+    contentConflict: false,
   };
 }
 
@@ -1991,6 +2149,19 @@ function clearTaskFailure(
   delete state.taskFailures[taskId];
 }
 
+function clearTaskWorkspaceStale(
+  state: Pick<OrchestratorState, "taskFailures">,
+  taskId: string,
+) {
+  const taskFailure = state.taskFailures[taskId];
+  if (!taskFailure) {
+    return;
+  }
+
+  taskFailure.staleWorkspace = false;
+  taskFailure.staleWorkspaceReason = null;
+}
+
 function reconcileTaskFailures(
   state: Pick<OrchestratorState, "taskFailures">,
   tasks: Task[],
@@ -2061,6 +2232,7 @@ function scheduleTaskRetry(params: {
   state: Pick<OrchestratorState, "taskFailures">;
   failureKind: TaskFailureKind;
   failureNote: string;
+  markWorkspaceStale?: boolean;
   failedAt?: Date;
 }): {
   historyStatus: "retry_scheduled" | "retry_exhausted";
@@ -2072,6 +2244,7 @@ function scheduleTaskRetry(params: {
     state,
     failureKind,
     failureNote,
+    markWorkspaceStale = false,
     failedAt = new Date(),
   } = params;
   const previousFailure = getTaskFailureRecord(state, taskId);
@@ -2083,6 +2256,13 @@ function scheduleTaskRetry(params: {
   const nextRetryAt = canRetry
     ? new Date(failedAt.getTime() + backoffSeconds * 1000).toISOString()
     : null;
+  const staleWorkspace =
+    markWorkspaceStale || previousFailure?.staleWorkspace === true;
+  const staleWorkspaceReason = staleWorkspace
+    ? markWorkspaceStale
+      ? failureNote
+      : (previousFailure?.staleWorkspaceReason ?? failureNote)
+    : null;
 
   state.taskFailures[taskId] = {
     consecutiveFailures,
@@ -2091,6 +2271,8 @@ function scheduleTaskRetry(params: {
     lastFailureNote: failureNote,
     lastBackoffSeconds: backoffSeconds,
     nextRetryAt,
+    staleWorkspace,
+    staleWorkspaceReason,
   };
 
   const failureLabel = describeTaskFailureKind(failureKind);
@@ -2104,15 +2286,21 @@ function scheduleTaskRetry(params: {
       backoffSeconds > 0
         ? `after ${backoffSeconds}s backoff`
         : "with no backoff";
+    const workspaceRefreshNote = staleWorkspace
+      ? " The task workspace is marked stale and will refresh from the latest integration branch before rerunning."
+      : "";
     return {
       historyStatus: "retry_scheduled",
-      historyNote: `${taskId} ${failureLabel} failure scheduled retry ${consecutiveFailures} of ${workflow.taskFailureRetryLimit} at ${nextRetryAt} ${backoffLabel}. ${failureNote}`,
+      historyNote: `${taskId} ${failureLabel} failure scheduled retry ${consecutiveFailures} of ${workflow.taskFailureRetryLimit} at ${nextRetryAt} ${backoffLabel}.${workspaceRefreshNote} ${failureNote}`,
     };
   }
 
+  const workspaceRefreshNote = staleWorkspace
+    ? " The task workspace remains marked stale and will refresh from the latest integration branch before the next manual rerun."
+    : "";
   return {
     historyStatus: "retry_exhausted",
-    historyNote: `${taskId} ${failureLabel} failure exhausted the automatic retry limit (${workflow.taskFailureRetryLimit}) after ${failureCountLabel}. Task remains pending. ${failureNote}`,
+    historyNote: `${taskId} ${failureLabel} failure exhausted the automatic retry limit (${workflow.taskFailureRetryLimit}) after ${failureCountLabel}. Task remains pending.${workspaceRefreshNote} ${failureNote}`,
   };
 }
 
@@ -2253,7 +2441,10 @@ function buildTaskSelectionNote(
     return `Selected ${task.id} in ${workspaceLabel}.`;
   }
 
-  return `Retrying ${task.id} in ${workspaceLabel} after ${taskFailure.consecutiveFailures} consecutive failure${
+  const refreshNote = taskFailure.staleWorkspace
+    ? " on a refreshed workspace"
+    : "";
+  return `Retrying ${task.id} in ${workspaceLabel}${refreshNote} after ${taskFailure.consecutiveFailures} consecutive failure${
     taskFailure.consecutiveFailures === 1 ? "" : "s"
   }.`;
 }
@@ -2825,6 +3016,11 @@ function integrateTerminalTask(params: {
 
     const cherryPickResult = cherryPickCommits(repoRoot, uniqueCommits);
     if (cherryPickResult.error) {
+      if (cherryPickResult.contentConflict) {
+        throw new WorkspaceRefreshRequiredError(
+          `${task.id} integration hit a cherry-pick content conflict against ${integrationBranch}. Rebuild the task workspace from the latest ${integrationBranch} before rerunning. ${cherryPickResult.error}`,
+        );
+      }
       throw new Error(
         `${task.id} integration failed: ${cherryPickResult.error}`,
       );
@@ -3059,7 +3255,7 @@ export function runOrchestratorLoop(
       let taskFailureKind: TaskFailureKind = "runtime";
 
       try {
-        const workspace = ensureWorkspace(repoRoot, workflow, task);
+        const workspace = ensureTaskWorkspace(repoRoot, workflow, task, state);
         taskFailureKind = "agent";
         const runResult = runAgentForTask(
           repoRoot,
@@ -3144,6 +3340,8 @@ export function runOrchestratorLoop(
           state,
           failureKind: taskFailureKind,
           failureNote,
+          markWorkspaceStale:
+            caughtError instanceof WorkspaceRefreshRequiredError,
         });
         historyStatus = retryResult.historyStatus;
         historyNote = retryResult.historyNote;

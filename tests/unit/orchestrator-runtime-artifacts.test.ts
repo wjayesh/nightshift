@@ -78,6 +78,8 @@ Runtime artifacts stay inside the repo.
       lastFailureNote: "Agent exited 1.",
       lastBackoffSeconds: 30,
       nextRetryAt: "2026-03-10T00:01:00.000Z",
+      staleWorkspace: false,
+      staleWorkspaceReason: null,
     };
     saveState(repoRoot, workflow, state);
 
@@ -92,6 +94,8 @@ Runtime artifacts stay inside the repo.
       lastFailureKind: "agent",
       lastBackoffSeconds: 30,
       nextRetryAt: "2026-03-10T00:01:00.000Z",
+      staleWorkspace: false,
+      staleWorkspaceReason: null,
     });
 
     appendProgress(repoRoot, workflow, [

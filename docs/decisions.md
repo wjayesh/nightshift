@@ -65,3 +65,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: Agent exits, workspace/runtime errors, and integration failures were all terminating the loop immediately, but the standalone repo needs to keep task docs pending and leave enough durable state behind to inspect retries later.
 - Decision: Add workflow-level `task_failure_retry_limit` and `task_failure_backoff_seconds` fields, persist consecutive per-task failure records in `state.json`, and schedule retries with a simple exponential backoff from that base delay instead of introducing a separate queue or service.
 - Impact: Task failures now stay local to the affected task unless the worker explicitly reports `TASK_BLOCKED`, progress/history entries show whether a retry was scheduled or exhausted, and operators can inspect `taskFailures` in state to see the last failure kind, message, backoff, and next retry time.
+
+## 2026-03-10 - ORCH-047 - Refresh only stale or safely idle task workspaces
+
+- Context: Git-worktree task branches can drift behind the integration branch, and rerunning the agent in the same stale branch after a cherry-pick content conflict just repeats the same failure instead of giving the task a fresh base.
+- Decision: Persist a per-task stale-workspace marker in retry state, mark that flag when task-branch cherry-picks hit content conflicts, and rebuild the task worktree from the latest integration branch before rerunning. Also refresh clean task worktrees with no unique commits when the integration branch has moved forward.
+- Impact: Conflict retries now discard drifted task branches instead of replaying them forever, idle worktrees stay aligned with the current integration branch, and normal in-progress worktrees with unique commits or pending changes are preserved until the orchestrator explicitly marks them stale.
