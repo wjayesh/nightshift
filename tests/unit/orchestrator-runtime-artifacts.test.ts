@@ -1,10 +1,12 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +16,7 @@ import {
   parseTaskFile,
   parseWorkflowFile,
   runAgentForTask,
+  runOrchestratorLoop,
   saveState,
 } from "../../src/orchestrator";
 
@@ -23,6 +26,13 @@ function createTempRepo(): string {
   const repoRoot = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"));
   TEMP_DIRS.push(repoRoot);
   return repoRoot;
+}
+
+function runGit(repoRoot: string, args: string[]) {
+  return spawnSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
 }
 
 afterEach(() => {
@@ -174,5 +184,141 @@ fs.writeFileSync(
     expect(readFileSync(lastMessagePath, "utf8")).toContain(
       "Captured terminal summary.",
     );
+  });
+
+  it("writes runtime status and heartbeat files next to the configured state file", () => {
+    const repoRoot = createTempRepo();
+    mkdirSync(join(repoRoot, "docs"), { recursive: true });
+    writeFileSync(
+      join(repoRoot, "docs/tasks.md"),
+      `### Complete Runtime Status
+- **ID**: \`ORCH-043\`
+- **Status**: \`pending\`
+- **Priority**: P0
+- **Depends on**: None
+`,
+    );
+    writeFileSync(join(repoRoot, "docs/decisions.md"), "# Decisions\n");
+    writeFileSync(
+      join(repoRoot, "fake-agent.cjs"),
+      `const fs = require("node:fs");
+const path = require("node:path");
+
+let outputPath = null;
+
+for (let index = 2; index < process.argv.length; index += 1) {
+  const arg = process.argv[index];
+  if (arg === "-o" && process.argv[index + 1]) {
+    outputPath = process.argv[index + 1];
+    index += 1;
+  }
+}
+
+if (!outputPath) {
+  process.exit(2);
+}
+
+fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+fs.writeFileSync(
+  outputPath,
+  "TASK_DONE " + process.env.ORCHESTRATOR_TASK_ID + "\\nRuntime status completed.\\n",
+);
+`,
+    );
+    writeFileSync(
+      join(repoRoot, "WORKFLOW.md"),
+      [
+        "---",
+        "name: runtime-health",
+        "task_sources:",
+        "  - docs/tasks.md",
+        "decision_file: docs/decisions.md",
+        "progress_file: .orchestrator/runtime/progress.md",
+        "state_file: .orchestrator/runtime/state.json",
+        "workspace_root: .orchestrator/runtime/workspaces",
+        "workspace_mode: shared",
+        `agent_command: "${process.execPath}"`,
+        "agent_args:",
+        "  - fake-agent.cjs",
+        "max_iterations: 5",
+        "poll_interval_seconds: 0",
+        "completion_phrase: COMPLETE",
+        "required_branch: main",
+        "terminal_commit_behavior: per_task",
+        "auto_push_every_commits: 0",
+        "review_every_tasks: 0",
+        "---",
+        "# Workflow",
+        "Write runtime health artifacts.",
+        "",
+      ].join("\n"),
+    );
+
+    expect(runGit(repoRoot, ["init", "-b", "main"]).status).toBe(0);
+    expect(
+      runGit(repoRoot, ["config", "user.email", "orchestrator@example.com"])
+        .status,
+    ).toBe(0);
+    expect(
+      runGit(repoRoot, ["config", "user.name", "Orchestrator Test"]).status,
+    ).toBe(0);
+    expect(runGit(repoRoot, ["add", "-A"]).status).toBe(0);
+    expect(runGit(repoRoot, ["commit", "-m", "initial"]).status).toBe(0);
+
+    const exitCode = runOrchestratorLoop(
+      {
+        workflowFile: "WORKFLOW.md",
+        maxIterations: 5,
+        once: true,
+        dryRun: false,
+      },
+      {
+        repoRoot,
+        log: () => undefined,
+        error: () => undefined,
+        sleep: () => undefined,
+      },
+    );
+    const statusPath = join(repoRoot, ".orchestrator/runtime/status.json");
+    const heartbeatPath = join(
+      repoRoot,
+      ".orchestrator/runtime/heartbeat.json",
+    );
+    const status = JSON.parse(readFileSync(statusPath, "utf8")) as {
+      phase: string;
+      activeTaskId: string | null;
+      iteration: number;
+      lastNote: string | null;
+      retry: {
+        activeFailureCount: number;
+        activeTaskIds: string[];
+      };
+    };
+    const heartbeat = JSON.parse(readFileSync(heartbeatPath, "utf8")) as {
+      phase: string;
+      activeTaskId: string | null;
+      iteration: number;
+      lastNote: string | null;
+    };
+
+    expect(exitCode).toBe(0);
+    expect(existsSync(statusPath)).toBe(true);
+    expect(existsSync(heartbeatPath)).toBe(true);
+    expect(status).toMatchObject({
+      phase: "completed",
+      activeTaskId: null,
+      iteration: 1,
+      retry: {
+        activeFailureCount: 0,
+        activeTaskIds: [],
+      },
+    });
+    expect(status.lastNote).toContain("All tracked tasks are complete.");
+    expect(heartbeat).toMatchObject({
+      phase: "completed",
+      activeTaskId: null,
+      iteration: 1,
+    });
+    expect(heartbeat.lastNote).toContain("All tracked tasks are complete.");
   });
 });

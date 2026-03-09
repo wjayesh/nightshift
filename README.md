@@ -133,8 +133,10 @@ Record consequential choices in the decision log.
 
 The current extraction repo uses the same shape but points at
 `WORKFLOW.orchestrator.md`, `docs/tasks-standalone-orchestrator.md`, and
-suffixed runtime artifact names such as `.orchestrator/orchestrator-progress.md`
-to avoid colliding with Mahilo's existing workflows.
+suffixed runtime artifact names such as `.orchestrator/orchestrator-progress.md`,
+`.orchestrator/orchestrator-status.json`, and
+`.orchestrator/orchestrator-heartbeat.json` to avoid colliding with Mahilo's
+existing workflows.
 
 Important front matter fields:
 
@@ -144,7 +146,9 @@ Important front matter fields:
   references across other files.
 - `instruction_files`: repo docs that must be read before the task section.
 - `decision_file`: markdown log for consequential implementation choices.
-- `progress_file` and `state_file`: durable runtime memory.
+- `progress_file` and `state_file`: durable runtime memory. `state_file` also
+  determines the sibling `status.json`, `heartbeat.json`, and `reviews.md`
+  runtime artifact names.
 - `workspace_root`: where shared workspaces or git worktrees live.
 - `workspace_mode`: `git_worktree` by default, `shared` as the escape hatch.
 - `agent_command` and `agent_args`: the exact agent invocation.
@@ -205,6 +209,11 @@ The standalone layout uses `.orchestrator/` for:
 - `progress.md`: append-only iteration log with task IDs, statuses, and notes.
 - `state.json`: persisted loop state such as iteration count, active task,
   commit counters, and history.
+- `status.json`: structured runtime health snapshot with the current phase,
+  active task, iteration, last note or error, heartbeat timestamp, and retry
+  metadata.
+- `heartbeat.json`: lightweight heartbeat view with the current phase, active
+  task, iteration, and last note or error for simple polling or stall checks.
 - `reviews.md`: append-only review log written next to the configured
   `state_file`. It records each review batch, remediation task IDs, and the
   captured last-message path.
@@ -218,7 +227,29 @@ The standalone layout uses `.orchestrator/` for:
 
 In this repo, the standalone workflow writes the same artifact types with
 workflow-specific filenames such as `orchestrator-progress.md`,
-`orchestrator-state.json`, and `orchestrator-reviews.md`.
+`orchestrator-state.json`, `orchestrator-status.json`,
+`orchestrator-heartbeat.json`, and `orchestrator-reviews.md`.
+
+## Inspect Runtime Health
+
+If `state_file` is `.orchestrator/state.json`, the worker also writes
+`.orchestrator/status.json` and `.orchestrator/heartbeat.json`. Inspect them
+directly:
+
+```bash
+jq . .orchestrator/status.json
+jq . .orchestrator/heartbeat.json
+```
+
+The most useful fields are:
+
+- `phase`, `activeTaskId`, `iteration`, and `heartbeatAt`: what the worker is
+  doing right now and how fresh that signal is.
+- `lastNote` and `lastError`: the last normal transition or failure summary.
+- `retry`: per-task retry records plus `waitingTaskIds`, `exhaustedTaskIds`,
+  and the next scheduled retry time.
+- `waitingUntil`: when a sleeping worker expects to wake up for the next poll
+  or retry window.
 
 ## Decision Docs
 

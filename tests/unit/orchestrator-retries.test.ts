@@ -159,6 +159,32 @@ function readState(repoRoot: string) {
   };
 }
 
+function readRuntimeStatus(repoRoot: string) {
+  return JSON.parse(
+    readFileSync(join(repoRoot, ".orchestrator/status.json"), "utf8"),
+  ) as {
+    phase: string;
+    activeTaskId: string | null;
+    iteration: number;
+    lastNote: string | null;
+    lastError: string | null;
+    retry: {
+      limit: number;
+      baseBackoffSeconds: number;
+      activeTaskIds: string[];
+      waitingTaskIds: string[];
+      taskFailures: Record<
+        string,
+        {
+          consecutiveFailures: number;
+          lastFailureKind: "agent" | "runtime" | "integration";
+          lastBackoffSeconds: number;
+        }
+      >;
+    };
+  };
+}
+
 afterEach(() => {
   while (TEMP_REPOS.length > 0) {
     const repoRoot = TEMP_REPOS.pop();
@@ -240,6 +266,7 @@ process.exit(runs === 1 ? 1 : 0);
 
     const result = runLoop(repoRoot, { once: true });
     const state = readState(repoRoot);
+    const runtimeStatus = readRuntimeStatus(repoRoot);
     const taskFailure = state.taskFailures["TASK-001"];
 
     expect(result.exitCode).toBe(0);
@@ -257,6 +284,24 @@ process.exit(runs === 1 ? 1 : 0);
       Date.parse(taskFailure.lastFailureAt),
     );
     expect(state.history[0]?.status).toBe("retry_scheduled");
+    expect(runtimeStatus).toMatchObject({
+      phase: "idle",
+      activeTaskId: null,
+      iteration: 1,
+      lastNote: null,
+      retry: {
+        limit: 1,
+        baseBackoffSeconds: 5,
+        activeTaskIds: ["TASK-001"],
+        waitingTaskIds: ["TASK-001"],
+      },
+    });
+    expect(runtimeStatus.lastError).toContain("scheduled retry");
+    expect(runtimeStatus.retry.taskFailures["TASK-001"]).toMatchObject({
+      consecutiveFailures: 1,
+      lastFailureKind: "runtime",
+      lastBackoffSeconds: 5,
+    });
   });
 
   it("persists integration retry details when git-worktree integration fails", () => {

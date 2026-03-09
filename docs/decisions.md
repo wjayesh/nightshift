@@ -71,3 +71,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: Git-worktree task branches can drift behind the integration branch, and rerunning the agent in the same stale branch after a cherry-pick content conflict just repeats the same failure instead of giving the task a fresh base.
 - Decision: Persist a per-task stale-workspace marker in retry state, mark that flag when task-branch cherry-picks hit content conflicts, and rebuild the task worktree from the latest integration branch before rerunning. Also refresh clean task worktrees with no unique commits when the integration branch has moved forward.
 - Impact: Conflict retries now discard drifted task branches instead of replaying them forever, idle worktrees stay aligned with the current integration branch, and normal in-progress worktrees with unique commits or pending changes are preserved until the orchestrator explicitly marks them stale.
+
+## 2026-03-10 - ORCH-043 - Derive runtime health files from the configured state file
+
+- Context: Operators and the upcoming supervisor loop need a durable health signal that is easier to poll than the full progress log or state history, but adding new workflow knobs just for file names would widen the standalone surface area.
+- Decision: Write sibling `status.json` and `heartbeat.json` files under the configured runtime root, derive their names from `state_file`, and update them at major loop transitions with the current phase, active task, iteration, last note or error, and retry metadata.
+- Impact: Repos now get predictable runtime health files such as `.orchestrator/status.json` or `.orchestrator/orchestrator-status.json`, operators can inspect retry/backoff state without digging through `state.json`, and the future supervisor can poll the same heartbeat surface for stall detection.

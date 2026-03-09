@@ -389,7 +389,7 @@ Refresh stale task branches from the latest integration branch instead of rerunn
 ### 4.4 Add runtime heartbeat and status files
 
 - **ID**: `ORCH-043`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-042
 

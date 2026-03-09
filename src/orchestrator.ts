@@ -6,7 +6,14 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import { spawnSync } from "node:child_process";
 
 export type TaskStatus =
@@ -120,6 +127,46 @@ export type OrchestratorState = {
   }>;
 };
 
+export type OrchestratorRuntimePhase =
+  | "starting"
+  | "running_task"
+  | "integrating_task"
+  | "running_review"
+  | "integrating_review"
+  | "idle"
+  | "sleeping"
+  | "completed"
+  | "error";
+
+export type OrchestratorRuntimeRetryStatus = {
+  limit: number;
+  baseBackoffSeconds: number;
+  activeFailureCount: number;
+  activeTaskIds: string[];
+  waitingTaskIds: string[];
+  exhaustedTaskIds: string[];
+  nextRetryAt: string | null;
+  taskFailures: Record<string, OrchestratorTaskFailureRecord>;
+};
+
+export type OrchestratorHeartbeat = {
+  workflowName: string;
+  workflowPath: string;
+  pid: number;
+  phase: OrchestratorRuntimePhase;
+  activeTaskId: string | null;
+  iteration: number;
+  heartbeatAt: string;
+  lastNote: string | null;
+  lastError: string | null;
+};
+
+export type OrchestratorRuntimeStatus = OrchestratorHeartbeat & {
+  waitingUntil: string | null;
+  lastHistoryStatus: OrchestratorHistoryStatus | null;
+  retry: OrchestratorRuntimeRetryStatus;
+};
+
 export type OrchestratorCliOptions = {
   workflowFile: string;
   maxIterations?: number;
@@ -146,6 +193,15 @@ type RuntimeLockOwner = {
 };
 
 type FrontMatterValue = string | number | string[];
+
+type RuntimeHealthUpdate = {
+  phase: OrchestratorRuntimePhase;
+  activeTaskId?: string | null;
+  lastNote?: string | null;
+  lastError?: string | null;
+  waitingUntil?: string | null;
+  now?: Date;
+};
 
 const DEFAULT_WORKFLOW: Omit<WorkflowConfig, "workflowBody" | "workflowPath"> =
   {
@@ -544,6 +600,33 @@ export function getRuntimeRoot(
   config: Pick<WorkflowConfig, "stateFile">,
 ): string {
   return dirname(resolvePath(repoRoot, config.stateFile));
+}
+
+function getRuntimeArtifactPath(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+  suffix: string,
+) {
+  const statePath = resolvePath(repoRoot, config.stateFile);
+  const stateFileName = basename(statePath) || "state.json";
+  const artifactFileName = stateFileName.endsWith("state.json")
+    ? stateFileName.replace(/state\.json$/, suffix)
+    : `${stateFileName}.${suffix}`;
+  return join(dirname(statePath), artifactFileName);
+}
+
+export function getRuntimeStatusPath(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+) {
+  return getRuntimeArtifactPath(repoRoot, config, "status.json");
+}
+
+export function getRuntimeHeartbeatPath(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+) {
+  return getRuntimeArtifactPath(repoRoot, config, "heartbeat.json");
 }
 
 export function loadTasks(repoRoot: string, taskSources: string[]): Task[] {
@@ -1692,12 +1775,7 @@ function getReviewLogPath(
   repoRoot: string,
   config: Pick<WorkflowConfig, "stateFile">,
 ): string {
-  const statePath = resolvePath(repoRoot, config.stateFile);
-  const stateFileName = statePath.split(/[\\/]/).pop() ?? "state.json";
-  const reviewFileName = stateFileName.endsWith("state.json")
-    ? stateFileName.replace(/state\.json$/, "reviews.md")
-    : `${stateFileName}.reviews.md`;
-  return join(dirname(statePath), reviewFileName);
+  return getRuntimeArtifactPath(repoRoot, config, "reviews.md");
 }
 
 function summarizeMessage(message: string, fallback: string): string {
@@ -2374,6 +2452,112 @@ function findNextRetryAt(
   return nextRetryAt;
 }
 
+function buildRuntimeRetryStatus(
+  workflow: Pick<
+    WorkflowConfig,
+    "taskFailureRetryLimit" | "taskFailureBackoffSeconds"
+  >,
+  state: Pick<OrchestratorState, "taskFailures">,
+  now = new Date(),
+): OrchestratorRuntimeRetryStatus {
+  const sortedEntries = Object.entries(state.taskFailures).sort(
+    ([leftTaskId], [rightTaskId]) => leftTaskId.localeCompare(rightTaskId),
+  );
+  const taskFailures = Object.fromEntries(sortedEntries);
+  const waitingTaskIds: string[] = [];
+  const exhaustedTaskIds: string[] = [];
+  let nextRetryAt: string | null = null;
+  let nextRetryTimestamp = Number.POSITIVE_INFINITY;
+
+  for (const [taskId, taskFailure] of sortedEntries) {
+    if (isTaskWaitingForRetry(taskFailure, now)) {
+      waitingTaskIds.push(taskId);
+    }
+
+    if (isTaskRetryExhausted(workflow, taskFailure)) {
+      exhaustedTaskIds.push(taskId);
+    }
+
+    if (!taskFailure.nextRetryAt) {
+      continue;
+    }
+
+    const retryTimestamp = Date.parse(taskFailure.nextRetryAt);
+    if (
+      !Number.isFinite(retryTimestamp) ||
+      retryTimestamp >= nextRetryTimestamp
+    ) {
+      continue;
+    }
+
+    nextRetryAt = taskFailure.nextRetryAt;
+    nextRetryTimestamp = retryTimestamp;
+  }
+
+  return {
+    limit: workflow.taskFailureRetryLimit,
+    baseBackoffSeconds: workflow.taskFailureBackoffSeconds,
+    activeFailureCount: sortedEntries.length,
+    activeTaskIds: sortedEntries.map(([taskId]) => taskId),
+    waitingTaskIds,
+    exhaustedTaskIds,
+    nextRetryAt,
+    taskFailures,
+  };
+}
+
+export function writeRuntimeHealth(
+  repoRoot: string,
+  workflow: Pick<
+    WorkflowConfig,
+    | "name"
+    | "workflowPath"
+    | "stateFile"
+    | "taskFailureRetryLimit"
+    | "taskFailureBackoffSeconds"
+  >,
+  state: Pick<
+    OrchestratorState,
+    "iteration" | "activeTaskId" | "taskFailures" | "history"
+  >,
+  update: RuntimeHealthUpdate,
+) {
+  const now = update.now ?? new Date();
+  const heartbeatAt = now.toISOString();
+  const activeTaskId =
+    update.activeTaskId === undefined
+      ? state.activeTaskId
+      : update.activeTaskId;
+  const lastHistoryStatus =
+    state.history.length > 0
+      ? (state.history[state.history.length - 1]?.status ?? null)
+      : null;
+  const heartbeat: OrchestratorHeartbeat = {
+    workflowName: workflow.name,
+    workflowPath: workflow.workflowPath,
+    pid: process.pid,
+    phase: update.phase,
+    activeTaskId: activeTaskId ?? null,
+    iteration: state.iteration,
+    heartbeatAt,
+    lastNote: update.lastNote ?? null,
+    lastError: update.lastError ?? null,
+  };
+  const status: OrchestratorRuntimeStatus = {
+    ...heartbeat,
+    waitingUntil: update.waitingUntil ?? null,
+    lastHistoryStatus,
+    retry: buildRuntimeRetryStatus(workflow, state, now),
+  };
+  const runtimeRoot = getRuntimeRoot(repoRoot, workflow);
+  const statusPath = getRuntimeStatusPath(repoRoot, workflow);
+  const heartbeatPath = getRuntimeHeartbeatPath(repoRoot, workflow);
+
+  ensureDirectory(runtimeRoot);
+  writeFileSync(statusPath, JSON.stringify(status, null, 2) + "\n");
+  writeFileSync(heartbeatPath, JSON.stringify(heartbeat, null, 2) + "\n");
+}
+
 function buildIdleNote(
   tasks: Task[],
   workflow: Pick<WorkflowConfig, "taskFailureRetryLimit">,
@@ -2625,12 +2809,21 @@ function executeReviewPass(params: {
   state: OrchestratorState;
   dryRun: boolean;
   log: (message: string) => void;
+  reportRuntimeHealth: (update: RuntimeHealthUpdate) => void;
 }): {
   refreshedActionableTasks: Task[];
   stopAfterIteration: boolean;
   errorMessage: string | null;
 } {
-  const { repoRoot, workflow, actionableTasks, state, dryRun, log } = params;
+  const {
+    repoRoot,
+    workflow,
+    actionableTasks,
+    state,
+    dryRun,
+    log,
+    reportRuntimeHealth,
+  } = params;
   const reviewedTasks = getReviewTaskContexts(
     repoRoot,
     workflow,
@@ -2669,6 +2862,11 @@ function executeReviewPass(params: {
     log(
       `- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`,
     );
+    reportRuntimeHealth({
+      phase: "idle",
+      activeTaskId: reviewId,
+      lastNote: `Dry run selected ${reviewId}.`,
+    });
     return {
       refreshedActionableTasks: actionableTasks,
       stopAfterIteration: false,
@@ -2691,6 +2889,11 @@ function executeReviewPass(params: {
     note: reviewStartNote,
   });
   saveState(repoRoot, workflow, state);
+  reportRuntimeHealth({
+    phase: "running_review",
+    activeTaskId: reviewId,
+    lastNote: reviewStartNote,
+  });
 
   try {
     const workspace = ensureWorkspace(repoRoot, workflow, reviewTask);
@@ -2716,6 +2919,11 @@ function executeReviewPass(params: {
         note: historyNote,
       });
       saveState(repoRoot, workflow, state);
+      reportRuntimeHealth({
+        phase: "error",
+        activeTaskId: reviewId,
+        lastError: historyNote,
+      });
       return {
         refreshedActionableTasks: actionableTasks,
         stopAfterIteration: true,
@@ -2751,6 +2959,11 @@ function executeReviewPass(params: {
       lastMessagePath: runResult.lastMessagePath,
     });
 
+    reportRuntimeHealth({
+      phase: "integrating_review",
+      activeTaskId: reviewId,
+      lastNote: `Integrating ${reviewId}.`,
+    });
     const integrationResult = integrateReviewPass({
       repoRoot,
       workflow,
@@ -2790,6 +3003,11 @@ function executeReviewPass(params: {
       note: historyNote,
     });
     saveState(repoRoot, workflow, state);
+    reportRuntimeHealth({
+      phase: "idle",
+      activeTaskId: null,
+      lastNote: historyNote,
+    });
 
     return {
       refreshedActionableTasks: integrationResult.refreshedActionableTasks,
@@ -2810,6 +3028,11 @@ function executeReviewPass(params: {
       note: historyNote,
     });
     saveState(repoRoot, workflow, state);
+    reportRuntimeHealth({
+      phase: "error",
+      activeTaskId: reviewId,
+      lastError: historyNote,
+    });
     return {
       refreshedActionableTasks: actionableTasks,
       stopAfterIteration: true,
@@ -3112,63 +3335,344 @@ export function runOrchestratorLoop(
   try {
     const state = loadState(repoRoot, workflow);
     const maxIterations = options.maxIterations ?? workflow.maxIterations;
+    const reportRuntimeHealth = (update: RuntimeHealthUpdate) =>
+      writeRuntimeHealth(repoRoot, workflow, state, update);
+    const reportRuntimeError = (
+      message: string,
+      activeTaskId = state.activeTaskId,
+    ) =>
+      reportRuntimeHealth({
+        phase: "error",
+        activeTaskId,
+        lastError: message,
+      });
 
-    for (let loop = 0; loop < maxIterations; loop += 1) {
-      const { actionable, taskUniverse } = loadActionableTasks(
-        repoRoot,
-        options.workflowFile,
-      );
-      if (reconcileTaskFailures(state, actionable)) {
-        saveState(repoRoot, workflow, state);
-      }
-      const now = new Date();
-      const retryEligibleActionable = filterRetryEligibleTasks(
-        actionable,
-        workflow,
-        state,
-        now,
-      );
+    reportRuntimeHealth({
+      phase: "starting",
+      activeTaskId: state.activeTaskId,
+      lastNote: `Worker ${process.pid} started ${workflow.name}.`,
+    });
 
-      if (shouldRunReview(workflow, state, actionable)) {
-        const reviewResult = executeReviewPass({
+    try {
+      for (let loop = 0; loop < maxIterations; loop += 1) {
+        const { actionable, taskUniverse } = loadActionableTasks(
           repoRoot,
+          options.workflowFile,
+        );
+        if (reconcileTaskFailures(state, actionable)) {
+          saveState(repoRoot, workflow, state);
+        }
+        const now = new Date();
+        const retryEligibleActionable = filterRetryEligibleTasks(
+          actionable,
           workflow,
-          actionableTasks: actionable,
           state,
-          dryRun: options.dryRun,
-          log,
-        });
+          now,
+        );
 
-        if (reviewResult.stopAfterIteration) {
-          error(reviewResult.errorMessage ?? "Review pass failed.");
-          return 1;
+        if (shouldRunReview(workflow, state, actionable)) {
+          const reviewResult = executeReviewPass({
+            repoRoot,
+            workflow,
+            actionableTasks: actionable,
+            state,
+            dryRun: options.dryRun,
+            log,
+            reportRuntimeHealth,
+          });
+
+          if (reviewResult.stopAfterIteration) {
+            error(reviewResult.errorMessage ?? "Review pass failed.");
+            return 1;
+          }
+
+          if (options.once || options.dryRun) {
+            return 0;
+          }
+
+          continue;
         }
 
-        if (options.once || options.dryRun) {
-          return 0;
+        const task = selectNextTask(
+          retryEligibleActionable,
+          state.activeTaskId,
+          taskUniverse,
+        );
+
+        if (!task) {
+          state.activeTaskId = null;
+          const idleNote = buildIdleNote(actionable, workflow, state, now);
+          appendProgress(repoRoot, workflow, [
+            formatHistoryNote(null, "idle", idleNote),
+          ]);
+          saveState(repoRoot, workflow, state);
+
+          if (areAllTasksComplete(actionable)) {
+            const integrationBranch =
+              workflow.requiredBranch ?? getCurrentBranch(repoRoot);
+            if (
+              integrationBranch &&
+              isAutoPushEnabled(workflow) &&
+              state.commitsSincePush > 0
+            ) {
+              const pushResult = maybePushBranch(
+                repoRoot,
+                integrationBranch,
+                state.commitsSincePush,
+                true,
+              );
+              if (pushResult.error) {
+                const errorMessage = `Final auto-push failed: ${pushResult.error}`;
+                reportRuntimeError(errorMessage, null);
+                error(errorMessage);
+                return 1;
+              }
+              state.commitsSincePush = 0;
+              saveState(repoRoot, workflow, state);
+            }
+            reportRuntimeHealth({
+              phase: "completed",
+              activeTaskId: null,
+              lastNote: `All tracked tasks are complete. ${workflow.completionPhrase}`,
+            });
+            log(workflow.completionPhrase);
+            return 0;
+          }
+
+          if (options.once) {
+            reportRuntimeHealth({
+              phase: "idle",
+              activeTaskId: null,
+              lastNote: idleNote,
+            });
+            return 0;
+          }
+
+          const pollWaitMs = workflow.pollIntervalSeconds * 1000;
+          const nextRetryAt = findNextRetryAt(actionable, state, now);
+          const nextRetryWaitMs =
+            nextRetryAt === null
+              ? null
+              : Math.max(0, Date.parse(nextRetryAt) - now.getTime());
+          const waitMs =
+            nextRetryWaitMs === null
+              ? pollWaitMs
+              : pollWaitMs > 0
+                ? Math.min(pollWaitMs, nextRetryWaitMs)
+                : nextRetryWaitMs;
+          reportRuntimeHealth({
+            phase: waitMs > 0 ? "sleeping" : "idle",
+            activeTaskId: null,
+            lastNote: idleNote,
+            waitingUntil:
+              waitMs > 0
+                ? new Date(now.getTime() + waitMs).toISOString()
+                : null,
+          });
+          if (waitMs > 0) {
+            sleep(waitMs);
+          }
+          continue;
         }
 
-        continue;
-      }
+        const workspacePreview = previewWorkspacePath(repoRoot, workflow, task);
+        const prompt = buildTaskPrompt(workflow, task, workspacePreview);
+        const taskSelectionNote = buildTaskSelectionNote(
+          repoRoot,
+          workspacePreview,
+          task,
+          state,
+        );
 
-      const task = selectNextTask(
-        retryEligibleActionable,
-        state.activeTaskId,
-        taskUniverse,
-      );
-
-      if (!task) {
-        state.activeTaskId = null;
+        state.iteration += 1;
+        state.activeTaskId = task.id;
         appendProgress(repoRoot, workflow, [
           formatHistoryNote(
-            null,
-            "idle",
-            buildIdleNote(actionable, workflow, state, now),
+            task.id,
+            task.id === state.lastCommittedTaskId ? "continued" : "started",
+            taskSelectionNote,
           ),
         ]);
         saveState(repoRoot, workflow, state);
 
-        if (areAllTasksComplete(actionable)) {
+        log(`\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`);
+        log(`Workspace: ${workspacePreview}`);
+
+        if (options.dryRun) {
+          log("Dry run selected task summary:");
+          log(`- Task: ${task.id}`);
+          log(`- Status: ${task.status}`);
+          log(`- Priority: ${task.priority}`);
+          log(`- Depends on: ${task.dependsOn.join(", ") || "None"}`);
+          log(
+            `- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`,
+          );
+          reportRuntimeHealth({
+            phase: "idle",
+            activeTaskId: task.id,
+            lastNote: `Dry run selected ${task.id}.`,
+          });
+          return 0;
+        }
+
+        reportRuntimeHealth({
+          phase: "running_task",
+          activeTaskId: task.id,
+          lastNote: taskSelectionNote,
+        });
+
+        let refreshedActionableTasks = actionable;
+        let historyStatus:
+          | "completed"
+          | "blocked"
+          | "continued"
+          | "retry_scheduled"
+          | "retry_exhausted" = "continued";
+        let historyNote = `${task.id} remains active.`;
+        let taskFailureKind: TaskFailureKind = "runtime";
+
+        try {
+          const workspace = ensureTaskWorkspace(
+            repoRoot,
+            workflow,
+            task,
+            state,
+          );
+          taskFailureKind = "agent";
+          const runResult = runAgentForTask(
+            repoRoot,
+            workflow,
+            task,
+            workspace.path,
+            buildTaskPrompt(workflow, task, workspace.path),
+          );
+          taskFailureKind = "runtime";
+          const workspaceActionableTasks = loadTasks(
+            workspace.path,
+            workflow.taskSources,
+          );
+          const rootTask = findTaskById(actionable, task.id) ?? task;
+          const workspaceTask =
+            findTaskById(workspaceActionableTasks, task.id) ?? rootTask;
+          restoreTaskStatusMetadata(
+            workspace.path,
+            rootTask,
+            workspaceTask.status,
+          );
+
+          if (didTaskBlock(task.id, runResult.lastMessage)) {
+            historyStatus = "blocked";
+            state.activeTaskId = null;
+            reportRuntimeHealth({
+              phase: "integrating_task",
+              activeTaskId: task.id,
+              lastNote: `Recording blocked outcome for ${task.id}.`,
+            });
+            taskFailureKind = "integration";
+            const integrationResult = integrateTerminalTask({
+              repoRoot,
+              workflow,
+              task: workspaceTask,
+              terminalStatus: "blocked",
+              rootActionableTasks: actionable,
+              state,
+            });
+            refreshedActionableTasks =
+              integrationResult.refreshedActionableTasks;
+            clearTaskFailure(state, task.id);
+            historyNote = extractBlockedReason(task.id, runResult.lastMessage);
+            if (integrationResult.historyNote) {
+              historyNote = `${historyNote} ${integrationResult.historyNote}`;
+            }
+          } else if (runResult.exitCode !== 0) {
+            state.activeTaskId = null;
+            const retryResult = scheduleTaskRetry({
+              taskId: task.id,
+              workflow,
+              state,
+              failureKind: "agent",
+              failureNote: buildAgentFailureNote(runResult),
+            });
+            historyStatus = retryResult.historyStatus;
+            historyNote = retryResult.historyNote;
+          } else if (didTaskComplete(task.id, runResult.lastMessage)) {
+            historyStatus = "completed";
+            state.activeTaskId = null;
+            reportRuntimeHealth({
+              phase: "integrating_task",
+              activeTaskId: task.id,
+              lastNote: `Integrating completed outcome for ${task.id}.`,
+            });
+            taskFailureKind = "integration";
+            const integrationResult = integrateTerminalTask({
+              repoRoot,
+              workflow,
+              task: workspaceTask,
+              terminalStatus: "completed",
+              rootActionableTasks: actionable,
+              state,
+            });
+            refreshedActionableTasks =
+              integrationResult.refreshedActionableTasks;
+            clearTaskFailure(state, task.id);
+            historyNote = integrationResult.historyNote;
+          } else {
+            historyStatus = "continued";
+            historyNote = `${task.id} remains active.`;
+            state.activeTaskId = task.id;
+            clearTaskFailure(state, task.id);
+          }
+        } catch (caughtError) {
+          state.activeTaskId = null;
+          const failureNote =
+            caughtError instanceof Error
+              ? caughtError.message
+              : String(caughtError);
+          const retryResult = scheduleTaskRetry({
+            taskId: task.id,
+            workflow,
+            state,
+            failureKind: taskFailureKind,
+            failureNote,
+            markWorkspaceStale:
+              caughtError instanceof WorkspaceRefreshRequiredError,
+          });
+          historyStatus = retryResult.historyStatus;
+          historyNote = retryResult.historyNote;
+        }
+
+        appendProgress(repoRoot, workflow, [
+          formatHistoryNote(task.id, historyStatus, historyNote),
+        ]);
+        state.history.push({
+          iteration: state.iteration,
+          taskId: task.id,
+          timestamp: new Date().toISOString(),
+          status: historyStatus,
+          note: historyNote,
+        });
+        saveState(repoRoot, workflow, state);
+
+        if (shouldRunReview(workflow, state, refreshedActionableTasks)) {
+          const reviewResult = executeReviewPass({
+            repoRoot,
+            workflow,
+            actionableTasks: refreshedActionableTasks,
+            state,
+            dryRun: false,
+            log,
+            reportRuntimeHealth,
+          });
+
+          if (reviewResult.stopAfterIteration) {
+            error(reviewResult.errorMessage ?? "Review pass failed.");
+            return 1;
+          }
+
+          refreshedActionableTasks = reviewResult.refreshedActionableTasks;
+        }
+
+        if (areAllTasksComplete(refreshedActionableTasks)) {
           const integrationBranch =
             workflow.requiredBranch ?? getCurrentBranch(repoRoot);
           if (
@@ -3183,236 +3687,66 @@ export function runOrchestratorLoop(
               true,
             );
             if (pushResult.error) {
-              error(`Final auto-push failed: ${pushResult.error}`);
+              const errorMessage = `Final auto-push failed: ${pushResult.error}`;
+              reportRuntimeError(errorMessage, null);
+              error(errorMessage);
               return 1;
             }
             state.commitsSincePush = 0;
             saveState(repoRoot, workflow, state);
           }
+          reportRuntimeHealth({
+            phase: "completed",
+            activeTaskId: null,
+            lastNote: `All tracked tasks are complete. ${workflow.completionPhrase}`,
+          });
           log(workflow.completionPhrase);
           return 0;
         }
 
+        const runtimeMessage =
+          historyStatus === "retry_scheduled" ||
+          historyStatus === "retry_exhausted"
+            ? { lastNote: null, lastError: historyNote }
+            : { lastNote: historyNote, lastError: null };
+
         if (options.once) {
+          reportRuntimeHealth({
+            phase: "idle",
+            activeTaskId: state.activeTaskId,
+            ...runtimeMessage,
+          });
           return 0;
         }
 
-        const pollWaitMs = workflow.pollIntervalSeconds * 1000;
-        const nextRetryAt = findNextRetryAt(actionable, state, now);
-        const nextRetryWaitMs =
-          nextRetryAt === null
-            ? null
-            : Math.max(0, Date.parse(nextRetryAt) - now.getTime());
-        const waitMs =
-          nextRetryWaitMs === null
-            ? pollWaitMs
-            : pollWaitMs > 0
-              ? Math.min(pollWaitMs, nextRetryWaitMs)
-              : nextRetryWaitMs;
+        const waitMs = workflow.pollIntervalSeconds * 1000;
+        reportRuntimeHealth({
+          phase: waitMs > 0 ? "sleeping" : "idle",
+          activeTaskId: state.activeTaskId,
+          waitingUntil:
+            waitMs > 0 ? new Date(Date.now() + waitMs).toISOString() : null,
+          ...runtimeMessage,
+        });
         if (waitMs > 0) {
           sleep(waitMs);
         }
-        continue;
       }
-
-      const workspacePreview = previewWorkspacePath(repoRoot, workflow, task);
-      const prompt = buildTaskPrompt(workflow, task, workspacePreview);
-
-      state.iteration += 1;
-      state.activeTaskId = task.id;
-      appendProgress(repoRoot, workflow, [
-        formatHistoryNote(
-          task.id,
-          task.id === state.lastCommittedTaskId ? "continued" : "started",
-          buildTaskSelectionNote(repoRoot, workspacePreview, task, state),
-        ),
-      ]);
-      saveState(repoRoot, workflow, state);
-
-      log(`\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`);
-      log(`Workspace: ${workspacePreview}`);
-
-      if (options.dryRun) {
-        log("Dry run selected task summary:");
-        log(`- Task: ${task.id}`);
-        log(`- Status: ${task.status}`);
-        log(`- Priority: ${task.priority}`);
-        log(`- Depends on: ${task.dependsOn.join(", ") || "None"}`);
-        log(
-          `- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`,
-        );
-        return 0;
-      }
-
-      let refreshedActionableTasks = actionable;
-      let historyStatus:
-        | "completed"
-        | "blocked"
-        | "continued"
-        | "retry_scheduled"
-        | "retry_exhausted" = "continued";
-      let historyNote = `${task.id} remains active.`;
-      let taskFailureKind: TaskFailureKind = "runtime";
-
-      try {
-        const workspace = ensureTaskWorkspace(repoRoot, workflow, task, state);
-        taskFailureKind = "agent";
-        const runResult = runAgentForTask(
-          repoRoot,
-          workflow,
-          task,
-          workspace.path,
-          buildTaskPrompt(workflow, task, workspace.path),
-        );
-        taskFailureKind = "runtime";
-        const workspaceActionableTasks = loadTasks(
-          workspace.path,
-          workflow.taskSources,
-        );
-        const rootTask = findTaskById(actionable, task.id) ?? task;
-        const workspaceTask =
-          findTaskById(workspaceActionableTasks, task.id) ?? rootTask;
-        restoreTaskStatusMetadata(
-          workspace.path,
-          rootTask,
-          workspaceTask.status,
-        );
-
-        if (didTaskBlock(task.id, runResult.lastMessage)) {
-          historyStatus = "blocked";
-          state.activeTaskId = null;
-          taskFailureKind = "integration";
-          const integrationResult = integrateTerminalTask({
-            repoRoot,
-            workflow,
-            task: workspaceTask,
-            terminalStatus: "blocked",
-            rootActionableTasks: actionable,
-            state,
-          });
-          refreshedActionableTasks = integrationResult.refreshedActionableTasks;
-          clearTaskFailure(state, task.id);
-          historyNote = extractBlockedReason(task.id, runResult.lastMessage);
-          if (integrationResult.historyNote) {
-            historyNote = `${historyNote} ${integrationResult.historyNote}`;
-          }
-        } else if (runResult.exitCode !== 0) {
-          state.activeTaskId = null;
-          const retryResult = scheduleTaskRetry({
-            taskId: task.id,
-            workflow,
-            state,
-            failureKind: "agent",
-            failureNote: buildAgentFailureNote(runResult),
-          });
-          historyStatus = retryResult.historyStatus;
-          historyNote = retryResult.historyNote;
-        } else if (didTaskComplete(task.id, runResult.lastMessage)) {
-          historyStatus = "completed";
-          state.activeTaskId = null;
-          taskFailureKind = "integration";
-          const integrationResult = integrateTerminalTask({
-            repoRoot,
-            workflow,
-            task: workspaceTask,
-            terminalStatus: "completed",
-            rootActionableTasks: actionable,
-            state,
-          });
-          refreshedActionableTasks = integrationResult.refreshedActionableTasks;
-          clearTaskFailure(state, task.id);
-          historyNote = integrationResult.historyNote;
-        } else {
-          historyStatus = "continued";
-          historyNote = `${task.id} remains active.`;
-          state.activeTaskId = task.id;
-          clearTaskFailure(state, task.id);
-        }
-      } catch (caughtError) {
-        state.activeTaskId = null;
-        const failureNote =
-          caughtError instanceof Error
-            ? caughtError.message
-            : String(caughtError);
-        const retryResult = scheduleTaskRetry({
-          taskId: task.id,
-          workflow,
-          state,
-          failureKind: taskFailureKind,
-          failureNote,
-          markWorkspaceStale:
-            caughtError instanceof WorkspaceRefreshRequiredError,
-        });
-        historyStatus = retryResult.historyStatus;
-        historyNote = retryResult.historyNote;
-      }
-
-      appendProgress(repoRoot, workflow, [
-        formatHistoryNote(task.id, historyStatus, historyNote),
-      ]);
-      state.history.push({
-        iteration: state.iteration,
-        taskId: task.id,
-        timestamp: new Date().toISOString(),
-        status: historyStatus,
-        note: historyNote,
-      });
-      saveState(repoRoot, workflow, state);
-
-      if (shouldRunReview(workflow, state, refreshedActionableTasks)) {
-        const reviewResult = executeReviewPass({
-          repoRoot,
-          workflow,
-          actionableTasks: refreshedActionableTasks,
-          state,
-          dryRun: false,
-          log,
-        });
-
-        if (reviewResult.stopAfterIteration) {
-          error(reviewResult.errorMessage ?? "Review pass failed.");
-          return 1;
-        }
-
-        refreshedActionableTasks = reviewResult.refreshedActionableTasks;
-      }
-
-      if (areAllTasksComplete(refreshedActionableTasks)) {
-        const integrationBranch =
-          workflow.requiredBranch ?? getCurrentBranch(repoRoot);
-        if (
-          integrationBranch &&
-          isAutoPushEnabled(workflow) &&
-          state.commitsSincePush > 0
-        ) {
-          const pushResult = maybePushBranch(
-            repoRoot,
-            integrationBranch,
-            state.commitsSincePush,
-            true,
-          );
-          if (pushResult.error) {
-            error(`Final auto-push failed: ${pushResult.error}`);
-            return 1;
-          }
-          state.commitsSincePush = 0;
-          saveState(repoRoot, workflow, state);
-        }
-        log(workflow.completionPhrase);
-        return 0;
-      }
-
-      if (options.once) {
-        return 0;
-      }
-
-      const waitMs = workflow.pollIntervalSeconds * 1000;
-      if (waitMs > 0) {
-        sleep(waitMs);
-      }
+    } catch (caughtError) {
+      reportRuntimeError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : String(caughtError),
+      );
+      throw caughtError;
     }
 
-    log(`Reached max iterations without seeing ${workflow.completionPhrase}.`);
+    const maxIterationNote = `Reached max iterations without seeing ${workflow.completionPhrase}.`;
+    reportRuntimeHealth({
+      phase: "idle",
+      activeTaskId: state.activeTaskId,
+      lastNote: maxIterationNote,
+    });
+    log(maxIterationNote);
     return 0;
   } finally {
     releaseRuntimeLock(workerLockPath);
