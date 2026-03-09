@@ -21,6 +21,9 @@
     "orchestrate:once": "bun run scripts/orchestrator.ts --once",
     "ralph": "./scripts/ralph.sh",
     "orchestrate:dry-run": "bun run scripts/orchestrator.ts --once --dry-run",
+    "orchestrate:standalone": "bun run scripts/orchestrator.ts --workflow WORKFLOW.orchestrator.md",
+    "orchestrate:standalone:once": "bun run scripts/orchestrator.ts --workflow WORKFLOW.orchestrator.md --once",
+    "orchestrate:standalone:dry-run": "bun run scripts/orchestrator.ts --workflow WORKFLOW.orchestrator.md --once --dry-run",
     "orchestrate:plugin": "bun run scripts/orchestrator.ts --workflow WORKFLOW.plugin.md",
     "orchestrate:plugin:once": "bun run scripts/orchestrator.ts --workflow WORKFLOW.plugin.md --once",
     "orchestrate:plugin:dry-run": "bun run scripts/orchestrator.ts --workflow WORKFLOW.plugin.md --once --dry-run"
