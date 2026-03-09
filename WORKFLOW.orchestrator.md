@@ -23,6 +23,10 @@ terminal_commit_behavior: per_task
 review_every_tasks: 0
 # 0 disables automatic pushes; commits remain local until manually pushed.
 auto_push_every_commits: 0
+# Retry transient task failures a few times before leaving the task pending for
+# operator follow-up.
+task_failure_retry_limit: 3
+task_failure_backoff_seconds: 30
 ---
 
 # Standalone Orchestrator Workflow

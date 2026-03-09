@@ -58,6 +58,7 @@ Runtime artifacts stay inside the repo.
       commitsSincePush: 0,
       lastCommittedTaskId: null,
       lastCommitSha: null,
+      taskFailures: {},
       history: [],
     });
 
@@ -70,6 +71,14 @@ Runtime artifacts stay inside the repo.
       status: "started",
       note: "Picked ORCH-012.",
     });
+    state.taskFailures["ORCH-012"] = {
+      consecutiveFailures: 1,
+      lastFailureAt: "2026-03-10T00:00:30.000Z",
+      lastFailureKind: "agent",
+      lastFailureNote: "Agent exited 1.",
+      lastBackoffSeconds: 30,
+      nextRetryAt: "2026-03-10T00:01:00.000Z",
+    };
     saveState(repoRoot, workflow, state);
 
     const reloadedState = loadState(repoRoot, workflow);
@@ -78,6 +87,12 @@ Runtime artifacts stay inside the repo.
       activeTaskId: "ORCH-012",
     });
     expect(reloadedState.history).toHaveLength(1);
+    expect(reloadedState.taskFailures["ORCH-012"]).toMatchObject({
+      consecutiveFailures: 1,
+      lastFailureKind: "agent",
+      lastBackoffSeconds: 30,
+      nextRetryAt: "2026-03-10T00:01:00.000Z",
+    });
 
     appendProgress(repoRoot, workflow, [
       "- 2026-03-10T00:00:00.000Z | ORCH-012 | started | Picked ORCH-012.",

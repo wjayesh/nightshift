@@ -154,14 +154,8 @@ describe("git integration dirty checkout guard", () => {
       },
     );
 
-    expect(exitCode).toBe(1);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("TASK-001 cannot update main");
-    expect(errors[0]).toContain(
-      "shared integration checkout has uncommitted changes",
-    );
-    expect(errors[0]).toContain("M notes.txt");
-    expect(errors[0]).toContain("?? scratch.txt");
+    expect(exitCode).toBe(0);
+    expect(errors).toEqual([]);
     expect(readFileSync(join(repoRoot, "docs/tasks.md"), "utf8")).toContain(
       "- **Status**: `pending`",
     );

@@ -20,6 +20,8 @@ export type TaskPriority = `P${number}` | "unscored";
 
 export type TerminalCommitBehavior = "per_task";
 
+export type TaskFailureKind = "agent" | "runtime" | "integration";
+
 export type WorkflowConfig = {
   name: string;
   taskSources: string[];
@@ -39,6 +41,8 @@ export type WorkflowConfig = {
   terminalCommitBehavior: TerminalCommitBehavior;
   autoPushEveryCommits: number;
   reviewEveryTasks: number;
+  taskFailureRetryLimit: number;
+  taskFailureBackoffSeconds: number;
   workflowBody: string;
   workflowPath: string;
 };
@@ -69,10 +73,20 @@ export type OrchestratorHistoryStatus =
   | "completed"
   | "blocked"
   | "idle"
-  | "agent_error"
+  | "retry_scheduled"
+  | "retry_exhausted"
   | "review_started"
   | "review_completed"
   | "review_error";
+
+export type OrchestratorTaskFailureRecord = {
+  consecutiveFailures: number;
+  lastFailureAt: string;
+  lastFailureKind: TaskFailureKind;
+  lastFailureNote: string;
+  lastBackoffSeconds: number;
+  nextRetryAt: string | null;
+};
 
 export type OrchestratorReviewRecord = {
   id: string;
@@ -94,6 +108,7 @@ export type OrchestratorState = {
   lastCommitSha: string | null;
   lastReviewedCompletionCount: number;
   reviews: OrchestratorReviewRecord[];
+  taskFailures: Record<string, OrchestratorTaskFailureRecord>;
   history: Array<{
     iteration: number;
     taskId: string | null;
@@ -150,6 +165,8 @@ const DEFAULT_WORKFLOW: Omit<WorkflowConfig, "workflowBody" | "workflowPath"> =
     terminalCommitBehavior: "per_task",
     autoPushEveryCommits: 3,
     reviewEveryTasks: 3,
+    taskFailureRetryLimit: 3,
+    taskFailureBackoffSeconds: 30,
   };
 
 const STATUS_VALUES = new Set<TaskStatus>([
@@ -226,6 +243,40 @@ function parseReviewEveryTasks(
 
   throw new Error(
     `Unsupported review_every_tasks in ${workflowPath}: ${String(value)}. Use a non-negative integer.`,
+  );
+}
+
+function parseTaskFailureRetryLimit(
+  value: FrontMatterValue | undefined,
+  workflowPath: string,
+): number {
+  if (value === undefined) {
+    return DEFAULT_WORKFLOW.taskFailureRetryLimit;
+  }
+
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  throw new Error(
+    `Unsupported task_failure_retry_limit in ${workflowPath}: ${String(value)}. Use a non-negative integer.`,
+  );
+}
+
+function parseTaskFailureBackoffSeconds(
+  value: FrontMatterValue | undefined,
+  workflowPath: string,
+): number {
+  if (value === undefined) {
+    return DEFAULT_WORKFLOW.taskFailureBackoffSeconds;
+  }
+
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  throw new Error(
+    `Unsupported task_failure_backoff_seconds in ${workflowPath}: ${String(value)}. Use a non-negative integer.`,
   );
 }
 
@@ -368,6 +419,14 @@ export function parseWorkflowFile(
         : DEFAULT_WORKFLOW.autoPushEveryCommits,
     reviewEveryTasks: parseReviewEveryTasks(
       frontMatter.review_every_tasks,
+      workflowPath,
+    ),
+    taskFailureRetryLimit: parseTaskFailureRetryLimit(
+      frontMatter.task_failure_retry_limit,
+      workflowPath,
+    ),
+    taskFailureBackoffSeconds: parseTaskFailureBackoffSeconds(
+      frontMatter.task_failure_backoff_seconds,
       workflowPath,
     ),
     workflowBody,
@@ -603,6 +662,58 @@ function getCompletedTaskIdsFromHistory(
   );
 }
 
+function normalizeTaskFailureKind(
+  value: unknown,
+): OrchestratorTaskFailureRecord["lastFailureKind"] {
+  return value === "agent" || value === "runtime" || value === "integration"
+    ? value
+    : "runtime";
+}
+
+function normalizeTaskFailures(
+  rawTaskFailures: unknown,
+): OrchestratorState["taskFailures"] {
+  if (!rawTaskFailures || typeof rawTaskFailures !== "object") {
+    return {};
+  }
+
+  const taskFailures: OrchestratorState["taskFailures"] = {};
+
+  for (const [taskId, rawEntry] of Object.entries(rawTaskFailures)) {
+    if (!rawEntry || typeof rawEntry !== "object") {
+      continue;
+    }
+
+    const entry = rawEntry as Partial<OrchestratorTaskFailureRecord>;
+    if (
+      typeof entry.consecutiveFailures !== "number" ||
+      !Number.isInteger(entry.consecutiveFailures) ||
+      entry.consecutiveFailures <= 0 ||
+      typeof entry.lastFailureAt !== "string" ||
+      typeof entry.lastFailureNote !== "string"
+    ) {
+      continue;
+    }
+
+    taskFailures[taskId] = {
+      consecutiveFailures: entry.consecutiveFailures,
+      lastFailureAt: entry.lastFailureAt,
+      lastFailureKind: normalizeTaskFailureKind(entry.lastFailureKind),
+      lastFailureNote: entry.lastFailureNote,
+      lastBackoffSeconds:
+        typeof entry.lastBackoffSeconds === "number" &&
+        Number.isInteger(entry.lastBackoffSeconds) &&
+        entry.lastBackoffSeconds >= 0
+          ? entry.lastBackoffSeconds
+          : 0,
+      nextRetryAt:
+        typeof entry.nextRetryAt === "string" ? entry.nextRetryAt : null,
+    };
+  }
+
+  return taskFailures;
+}
+
 export function loadState(
   repoRoot: string,
   config: WorkflowConfig,
@@ -619,6 +730,7 @@ export function loadState(
       lastCommitSha: null,
       lastReviewedCompletionCount: 0,
       reviews: [],
+      taskFailures: {},
       history: [],
     };
     writeFileSync(statePath, JSON.stringify(initialState, null, 2) + "\n");
@@ -646,6 +758,7 @@ export function loadState(
     lastCommitSha: state.lastCommitSha ?? null,
     lastReviewedCompletionCount,
     reviews: Array.isArray(state.reviews) ? state.reviews : [],
+    taskFailures: normalizeTaskFailures(state.taskFailures),
     history,
   };
 }
@@ -1002,6 +1115,7 @@ export type AgentRunResult = {
   lastMessage: string;
   lastMessagePath: string;
   commandLine: string;
+  spawnError: string | null;
 };
 
 export type RepoCommitResult = {
@@ -1398,6 +1512,7 @@ function runAgentCommand(
       ? readFileSync(lastMessagePath, "utf8")
       : "",
     commandLine: [config.agentCommand, ...args].join(" "),
+    spawnError: child.error?.message ?? null,
   };
 }
 
@@ -1860,6 +1975,287 @@ function isAutoPushEnabled(
   workflow: Pick<WorkflowConfig, "autoPushEveryCommits">,
 ) {
   return workflow.autoPushEveryCommits > 0;
+}
+
+function getTaskFailureRecord(
+  state: Pick<OrchestratorState, "taskFailures">,
+  taskId: string,
+): OrchestratorTaskFailureRecord | null {
+  return state.taskFailures[taskId] ?? null;
+}
+
+function clearTaskFailure(
+  state: Pick<OrchestratorState, "taskFailures">,
+  taskId: string,
+) {
+  delete state.taskFailures[taskId];
+}
+
+function reconcileTaskFailures(
+  state: Pick<OrchestratorState, "taskFailures">,
+  tasks: Task[],
+) {
+  const retryableTaskIds = new Set(
+    tasks
+      .filter(
+        (task) => task.status === "pending" || task.status === "in-progress",
+      )
+      .map((task) => task.id),
+  );
+  let changed = false;
+
+  for (const taskId of Object.keys(state.taskFailures)) {
+    if (retryableTaskIds.has(taskId)) {
+      continue;
+    }
+    delete state.taskFailures[taskId];
+    changed = true;
+  }
+
+  return changed;
+}
+
+function calculateTaskFailureBackoffSeconds(
+  workflow: Pick<WorkflowConfig, "taskFailureBackoffSeconds">,
+  consecutiveFailures: number,
+) {
+  if (workflow.taskFailureBackoffSeconds <= 0) {
+    return 0;
+  }
+
+  return (
+    workflow.taskFailureBackoffSeconds *
+    Math.pow(2, Math.max(0, consecutiveFailures - 1))
+  );
+}
+
+function describeTaskFailureKind(kind: TaskFailureKind) {
+  if (kind === "agent") {
+    return "agent";
+  }
+  if (kind === "integration") {
+    return "integration";
+  }
+  return "runtime";
+}
+
+function buildAgentFailureNote(runResult: AgentRunResult) {
+  const summary = summarizeMessage(runResult.lastMessage, "");
+  const prefix = runResult.spawnError
+    ? `Agent command failed to start: ${runResult.spawnError}.`
+    : `Agent command exited ${runResult.exitCode}.`;
+
+  if (!summary) {
+    return `${prefix} Command: ${runResult.commandLine}`;
+  }
+
+  return `${prefix} Last message: ${summary} Command: ${runResult.commandLine}`;
+}
+
+function scheduleTaskRetry(params: {
+  taskId: string;
+  workflow: Pick<
+    WorkflowConfig,
+    "taskFailureRetryLimit" | "taskFailureBackoffSeconds"
+  >;
+  state: Pick<OrchestratorState, "taskFailures">;
+  failureKind: TaskFailureKind;
+  failureNote: string;
+  failedAt?: Date;
+}): {
+  historyStatus: "retry_scheduled" | "retry_exhausted";
+  historyNote: string;
+} {
+  const {
+    taskId,
+    workflow,
+    state,
+    failureKind,
+    failureNote,
+    failedAt = new Date(),
+  } = params;
+  const previousFailure = getTaskFailureRecord(state, taskId);
+  const consecutiveFailures = (previousFailure?.consecutiveFailures ?? 0) + 1;
+  const canRetry = consecutiveFailures <= workflow.taskFailureRetryLimit;
+  const backoffSeconds = canRetry
+    ? calculateTaskFailureBackoffSeconds(workflow, consecutiveFailures)
+    : 0;
+  const nextRetryAt = canRetry
+    ? new Date(failedAt.getTime() + backoffSeconds * 1000).toISOString()
+    : null;
+
+  state.taskFailures[taskId] = {
+    consecutiveFailures,
+    lastFailureAt: failedAt.toISOString(),
+    lastFailureKind: failureKind,
+    lastFailureNote: failureNote,
+    lastBackoffSeconds: backoffSeconds,
+    nextRetryAt,
+  };
+
+  const failureLabel = describeTaskFailureKind(failureKind);
+  const failureCountLabel =
+    consecutiveFailures === 1
+      ? "1 consecutive failure"
+      : `${consecutiveFailures} consecutive failures`;
+
+  if (canRetry) {
+    const backoffLabel =
+      backoffSeconds > 0
+        ? `after ${backoffSeconds}s backoff`
+        : "with no backoff";
+    return {
+      historyStatus: "retry_scheduled",
+      historyNote: `${taskId} ${failureLabel} failure scheduled retry ${consecutiveFailures} of ${workflow.taskFailureRetryLimit} at ${nextRetryAt} ${backoffLabel}. ${failureNote}`,
+    };
+  }
+
+  return {
+    historyStatus: "retry_exhausted",
+    historyNote: `${taskId} ${failureLabel} failure exhausted the automatic retry limit (${workflow.taskFailureRetryLimit}) after ${failureCountLabel}. Task remains pending. ${failureNote}`,
+  };
+}
+
+function isTaskRetryExhausted(
+  workflow: Pick<WorkflowConfig, "taskFailureRetryLimit">,
+  taskFailure: OrchestratorTaskFailureRecord | null,
+) {
+  return (
+    !!taskFailure &&
+    taskFailure.nextRetryAt === null &&
+    taskFailure.consecutiveFailures > workflow.taskFailureRetryLimit
+  );
+}
+
+function isTaskWaitingForRetry(
+  taskFailure: OrchestratorTaskFailureRecord | null,
+  now = new Date(),
+) {
+  if (!taskFailure?.nextRetryAt) {
+    return false;
+  }
+
+  return Date.parse(taskFailure.nextRetryAt) > now.getTime();
+}
+
+function filterRetryEligibleTasks(
+  tasks: Task[],
+  workflow: Pick<WorkflowConfig, "taskFailureRetryLimit">,
+  state: Pick<OrchestratorState, "taskFailures">,
+  now = new Date(),
+) {
+  return tasks.filter((task) => {
+    if (task.status !== "pending") {
+      return true;
+    }
+
+    const taskFailure = getTaskFailureRecord(state, task.id);
+    return (
+      !isTaskRetryExhausted(workflow, taskFailure) &&
+      !isTaskWaitingForRetry(taskFailure, now)
+    );
+  });
+}
+
+function findNextRetryAt(
+  tasks: Task[],
+  state: Pick<OrchestratorState, "taskFailures">,
+  now = new Date(),
+): string | null {
+  let nextRetryAt: string | null = null;
+  let nextRetryTimestamp = Number.POSITIVE_INFINITY;
+
+  for (const task of tasks) {
+    const taskFailure = getTaskFailureRecord(state, task.id);
+    if (!taskFailure?.nextRetryAt) {
+      continue;
+    }
+
+    const retryTimestamp = Date.parse(taskFailure.nextRetryAt);
+    if (
+      retryTimestamp <= now.getTime() ||
+      retryTimestamp >= nextRetryTimestamp
+    ) {
+      continue;
+    }
+
+    nextRetryAt = taskFailure.nextRetryAt;
+    nextRetryTimestamp = retryTimestamp;
+  }
+
+  return nextRetryAt;
+}
+
+function buildIdleNote(
+  tasks: Task[],
+  workflow: Pick<WorkflowConfig, "taskFailureRetryLimit">,
+  state: Pick<OrchestratorState, "taskFailures">,
+  now = new Date(),
+) {
+  const waitingTasks = tasks
+    .map((task) => ({
+      task,
+      taskFailure: getTaskFailureRecord(state, task.id),
+    }))
+    .filter(
+      ({ taskFailure }) =>
+        !!taskFailure && isTaskWaitingForRetry(taskFailure, now),
+    )
+    .sort((left, right) =>
+      (left.taskFailure?.nextRetryAt ?? "").localeCompare(
+        right.taskFailure?.nextRetryAt ?? "",
+      ),
+    );
+  const exhaustedTasks = tasks
+    .map((task) => ({
+      task,
+      taskFailure: getTaskFailureRecord(state, task.id),
+    }))
+    .filter(({ taskFailure }) =>
+      isTaskRetryExhausted(workflow, taskFailure ?? null),
+    );
+  const notes = ["No ready tasks."];
+
+  if (waitingTasks.length > 0) {
+    const firstWaiting = waitingTasks[0];
+    const extraWaiting =
+      waitingTasks.length > 1
+        ? ` (+${waitingTasks.length - 1} more waiting for retry)`
+        : "";
+    notes.push(
+      `Waiting to retry ${firstWaiting.task.id} at ${firstWaiting.taskFailure?.nextRetryAt}.${extraWaiting}`,
+    );
+  }
+
+  if (exhaustedTasks.length > 0) {
+    const firstExhausted = exhaustedTasks[0];
+    const extraExhausted =
+      exhaustedTasks.length > 1
+        ? ` (+${exhaustedTasks.length - 1} more with automatic retries exhausted)`
+        : "";
+    notes.push(
+      `Automatic retries are exhausted for ${firstExhausted.task.id}.${extraExhausted}`,
+    );
+  }
+
+  return notes.join(" ");
+}
+
+function buildTaskSelectionNote(
+  repoRoot: string,
+  workspacePath: string,
+  task: Task,
+  state: Pick<OrchestratorState, "taskFailures">,
+) {
+  const workspaceLabel = workspacePath === repoRoot ? "." : workspacePath;
+  const taskFailure = getTaskFailureRecord(state, task.id);
+  if (!taskFailure) {
+    return `Selected ${task.id} in ${workspaceLabel}.`;
+  }
+
+  return `Retrying ${task.id} in ${workspaceLabel} after ${taskFailure.consecutiveFailures} consecutive failure${
+    taskFailure.consecutiveFailures === 1 ? "" : "s"
+  }.`;
 }
 
 function findReviewRemediationTasks(beforeTasks: Task[], afterTasks: Task[]) {
@@ -2526,6 +2922,16 @@ export function runOrchestratorLoop(
         repoRoot,
         options.workflowFile,
       );
+      if (reconcileTaskFailures(state, actionable)) {
+        saveState(repoRoot, workflow, state);
+      }
+      const now = new Date();
+      const retryEligibleActionable = filterRetryEligibleTasks(
+        actionable,
+        workflow,
+        state,
+        now,
+      );
 
       if (shouldRunReview(workflow, state, actionable)) {
         const reviewResult = executeReviewPass({
@@ -2549,12 +2955,20 @@ export function runOrchestratorLoop(
         continue;
       }
 
-      const task = selectNextTask(actionable, state.activeTaskId, taskUniverse);
+      const task = selectNextTask(
+        retryEligibleActionable,
+        state.activeTaskId,
+        taskUniverse,
+      );
 
       if (!task) {
         state.activeTaskId = null;
         appendProgress(repoRoot, workflow, [
-          formatHistoryNote(null, "idle", "No ready tasks."),
+          formatHistoryNote(
+            null,
+            "idle",
+            buildIdleNote(actionable, workflow, state, now),
+          ),
         ]);
         saveState(repoRoot, workflow, state);
 
@@ -2587,7 +3001,18 @@ export function runOrchestratorLoop(
           return 0;
         }
 
-        const waitMs = workflow.pollIntervalSeconds * 1000;
+        const pollWaitMs = workflow.pollIntervalSeconds * 1000;
+        const nextRetryAt = findNextRetryAt(actionable, state, now);
+        const nextRetryWaitMs =
+          nextRetryAt === null
+            ? null
+            : Math.max(0, Date.parse(nextRetryAt) - now.getTime());
+        const waitMs =
+          nextRetryWaitMs === null
+            ? pollWaitMs
+            : pollWaitMs > 0
+              ? Math.min(pollWaitMs, nextRetryWaitMs)
+              : nextRetryWaitMs;
         if (waitMs > 0) {
           sleep(waitMs);
         }
@@ -2603,7 +3028,7 @@ export function runOrchestratorLoop(
         formatHistoryNote(
           task.id,
           task.id === state.lastCommittedTaskId ? "continued" : "started",
-          `Selected ${task.id} in ${workspacePreview === repoRoot ? "." : workspacePreview}.`,
+          buildTaskSelectionNote(repoRoot, workspacePreview, task, state),
         ),
       ]);
       saveState(repoRoot, workflow, state);
@@ -2623,22 +3048,27 @@ export function runOrchestratorLoop(
         return 0;
       }
 
-      const workspace = ensureWorkspace(repoRoot, workflow, task);
-      const runResult = runAgentForTask(
-        repoRoot,
-        workflow,
-        task,
-        workspace.path,
-        buildTaskPrompt(workflow, task, workspace.path),
-      );
-
       let refreshedActionableTasks = actionable;
-      let historyStatus: "completed" | "blocked" | "agent_error" | "continued" =
-        "continued";
-      let historyNote = `Agent exited with code ${runResult.exitCode}.`;
-      let stopAfterIteration = false;
+      let historyStatus:
+        | "completed"
+        | "blocked"
+        | "continued"
+        | "retry_scheduled"
+        | "retry_exhausted" = "continued";
+      let historyNote = `${task.id} remains active.`;
+      let taskFailureKind: TaskFailureKind = "runtime";
 
       try {
+        const workspace = ensureWorkspace(repoRoot, workflow, task);
+        taskFailureKind = "agent";
+        const runResult = runAgentForTask(
+          repoRoot,
+          workflow,
+          task,
+          workspace.path,
+          buildTaskPrompt(workflow, task, workspace.path),
+        );
+        taskFailureKind = "runtime";
         const workspaceActionableTasks = loadTasks(
           workspace.path,
           workflow.taskSources,
@@ -2652,27 +3082,10 @@ export function runOrchestratorLoop(
           workspaceTask.status,
         );
 
-        if (runResult.exitCode !== 0) {
-          historyStatus = "agent_error";
-          historyNote = `Agent command failed: ${runResult.commandLine}`;
-          state.activeTaskId = null;
-          stopAfterIteration = true;
-        } else if (didTaskComplete(task.id, runResult.lastMessage)) {
-          historyStatus = "completed";
-          state.activeTaskId = null;
-          const integrationResult = integrateTerminalTask({
-            repoRoot,
-            workflow,
-            task: workspaceTask,
-            terminalStatus: "completed",
-            rootActionableTasks: actionable,
-            state,
-          });
-          refreshedActionableTasks = integrationResult.refreshedActionableTasks;
-          historyNote = integrationResult.historyNote;
-        } else if (didTaskBlock(task.id, runResult.lastMessage)) {
+        if (didTaskBlock(task.id, runResult.lastMessage)) {
           historyStatus = "blocked";
           state.activeTaskId = null;
+          taskFailureKind = "integration";
           const integrationResult = integrateTerminalTask({
             repoRoot,
             workflow,
@@ -2682,52 +3095,71 @@ export function runOrchestratorLoop(
             state,
           });
           refreshedActionableTasks = integrationResult.refreshedActionableTasks;
+          clearTaskFailure(state, task.id);
           historyNote = extractBlockedReason(task.id, runResult.lastMessage);
           if (integrationResult.historyNote) {
             historyNote = `${historyNote} ${integrationResult.historyNote}`;
           }
+        } else if (runResult.exitCode !== 0) {
+          state.activeTaskId = null;
+          const retryResult = scheduleTaskRetry({
+            taskId: task.id,
+            workflow,
+            state,
+            failureKind: "agent",
+            failureNote: buildAgentFailureNote(runResult),
+          });
+          historyStatus = retryResult.historyStatus;
+          historyNote = retryResult.historyNote;
+        } else if (didTaskComplete(task.id, runResult.lastMessage)) {
+          historyStatus = "completed";
+          state.activeTaskId = null;
+          taskFailureKind = "integration";
+          const integrationResult = integrateTerminalTask({
+            repoRoot,
+            workflow,
+            task: workspaceTask,
+            terminalStatus: "completed",
+            rootActionableTasks: actionable,
+            state,
+          });
+          refreshedActionableTasks = integrationResult.refreshedActionableTasks;
+          clearTaskFailure(state, task.id);
+          historyNote = integrationResult.historyNote;
         } else {
           historyStatus = "continued";
           historyNote = `${task.id} remains active.`;
           state.activeTaskId = task.id;
+          clearTaskFailure(state, task.id);
         }
-
-        appendProgress(repoRoot, workflow, [
-          formatHistoryNote(task.id, historyStatus, historyNote),
-        ]);
-        state.history.push({
-          iteration: state.iteration,
-          taskId: task.id,
-          timestamp: new Date().toISOString(),
-          status: historyStatus,
-          note: historyNote,
-        });
-        saveState(repoRoot, workflow, state);
       } catch (caughtError) {
-        historyStatus = "agent_error";
-        historyNote =
+        state.activeTaskId = null;
+        const failureNote =
           caughtError instanceof Error
             ? caughtError.message
             : String(caughtError);
-        state.activeTaskId = null;
-        appendProgress(repoRoot, workflow, [
-          formatHistoryNote(task.id, historyStatus, historyNote),
-        ]);
-        state.history.push({
-          iteration: state.iteration,
+        const retryResult = scheduleTaskRetry({
           taskId: task.id,
-          timestamp: new Date().toISOString(),
-          status: historyStatus,
-          note: historyNote,
+          workflow,
+          state,
+          failureKind: taskFailureKind,
+          failureNote,
         });
-        saveState(repoRoot, workflow, state);
-        stopAfterIteration = true;
+        historyStatus = retryResult.historyStatus;
+        historyNote = retryResult.historyNote;
       }
 
-      if (stopAfterIteration) {
-        error(historyNote);
-        return 1;
-      }
+      appendProgress(repoRoot, workflow, [
+        formatHistoryNote(task.id, historyStatus, historyNote),
+      ]);
+      state.history.push({
+        iteration: state.iteration,
+        taskId: task.id,
+        timestamp: new Date().toISOString(),
+        status: historyStatus,
+        note: historyNote,
+      });
+      saveState(repoRoot, workflow, state);
 
       if (shouldRunReview(workflow, state, refreshedActionableTasks)) {
         const reviewResult = executeReviewPass({

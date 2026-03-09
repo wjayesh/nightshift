@@ -351,9 +351,13 @@ Make the orchestrator, not the worker, responsible for task status mutations in 
 ### 4.3 Add non-fatal retries and backoff
 
 - **ID**: `ORCH-042`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-011
+- **Notes**:
+  - 2026-03-10: Adding workflow-level retry/backoff config, persisted per-task retry state, and loop behavior that keeps task failures pending unless the worker explicitly reports `TASK_BLOCKED`.
+  - 2026-03-10: Added `task_failure_retry_limit` plus `task_failure_backoff_seconds`, persisted per-task retry state in `state.json`, and changed the standalone loop to schedule non-fatal retries for agent/runtime/integration failures while leaving task docs `pending` until terminal integration succeeds.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts tests/unit/orchestrator-retries.test.ts tests/unit/orchestrator-git-integration.test.ts tests/unit/orchestrator-cli.test.ts tests/unit/orchestrator-review-loop.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts tests/unit/orchestrator.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts tests/unit/orchestrator-git-integration.test.ts tests/unit/orchestrator-retries.test.ts docs/tasks-standalone-orchestrator.md docs/decisions.md WORKFLOW.orchestrator.md`.
 
 Keep runtime, agent, and integration failures from killing the whole loop on the first error.
 
