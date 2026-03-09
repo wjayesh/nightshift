@@ -76,18 +76,22 @@ Move the generic orchestration logic into a standalone repo layout with minimal 
 ### 1.2 Extract CLI entrypoint
 
 - **ID**: `ORCH-011`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-010
+- **Notes**:
+  - 2026-03-09: Started extracting the runtime loop behind exported core helpers so `scripts/orchestrator.ts` can shrink to a standalone CLI wrapper with explicit `--once`, `--dry-run`, and workflow selection behavior.
+  - 2026-03-09: Moved the loop, lock handling, integration helpers, and CLI arg parsing into `src/orchestrator.ts`; reduced `scripts/orchestrator.ts` to a thin wrapper; and added end-to-end CLI tests covering continuous mode, `--once`, `--dry-run`, and `--workflow`.
+  - 2026-03-09: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-cli.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts scripts/orchestrator.ts tests/unit/orchestrator-cli.test.ts docs/tasks-standalone-orchestrator.md`. Repo-wide `node node_modules/typescript/bin/tsc --noEmit` still fails because `tsconfig.json` sets `rootDir: ./src` while including `tests/**/*.ts`.
 
 Create a standalone CLI entrypoint around the orchestrator core.
 
 **Acceptance Criteria**
 
-- [ ] Continuous mode works
-- [ ] `--once` works
-- [ ] `--dry-run` works
-- [ ] Workflow file selection works
+- [x] Continuous mode works
+- [x] `--once` works
+- [x] `--dry-run` works
+- [x] Workflow file selection works
 
 ### 1.3 Preserve runtime artifacts
 
