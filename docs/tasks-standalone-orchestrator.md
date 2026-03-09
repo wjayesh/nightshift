@@ -199,17 +199,20 @@ Write a README that explains setup, workflow files, task docs, runtime artifacts
 ### 2.2 Add example workflow and task docs
 
 - **ID**: `ORCH-021`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P1
 - **Depends on**: ORCH-020
+- **Notes**:
+  - 2026-03-10: Added `examples/WORKFLOW.example.md`, `examples/tasks.example.md`, and `examples/decisions.example.md` as a small billing-report export adoption example for copied repos.
+  - 2026-03-10: Validation passed with `node node_modules/prettier/bin/prettier.cjs --check README.md examples/WORKFLOW.example.md examples/tasks.example.md examples/decisions.example.md docs/tasks-standalone-orchestrator.md` and a `bun -e` parser smoke test for the example workflow/task docs.
 
 Provide small example files that show how a new repo would adopt the orchestrator.
 
 **Acceptance Criteria**
 
-- [ ] Example workflow exists
-- [ ] Example task doc exists
-- [ ] Examples are small and realistic
+- [x] Example workflow exists
+- [x] Example task doc exists
+- [x] Examples are small and realistic
 
 ## Phase 3 - Planned Enhancements
 

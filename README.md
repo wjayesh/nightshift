@@ -286,6 +286,11 @@ reviewed and pushed deliberately.
 
 The adoption model is intentionally small.
 
+If you want a copyable starting point instead of a blank file, use
+`examples/WORKFLOW.example.md`, `examples/tasks.example.md`, and
+`examples/decisions.example.md` as the initial templates for `WORKFLOW.md`,
+`docs/tasks.md`, and `docs/decisions.md`.
+
 1. Copy `src/orchestrator.ts` and `scripts/orchestrator.ts` into the new repo.
 2. Add a root `WORKFLOW.md` based on `WORKFLOW.orchestrator.md`.
 3. Create `docs/tasks.md` and `docs/decisions.md`.
