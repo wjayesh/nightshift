@@ -113,6 +113,20 @@ describe("task parsing and selection", () => {
     expect(tasks[1].dependsOn).toEqual(["TASK-001"]);
   });
 
+  it("parses comma-separated Depends on metadata", () => {
+    const [task] = parseTaskFile(
+      `### 0.4 Fourth Task
+- **ID**: \`TASK-004\`
+- **Status**: \`pending\`
+- **Priority**: P1
+- **Depends on**: \`TASK-001\`, TASK-002
+`,
+      "docs/sample.md",
+    );
+
+    expect(task.dependsOn).toEqual(["TASK-001", "TASK-002"]);
+  });
+
   it("prefers the active or in-progress task", () => {
     const tasks = parseTaskFile(taskDoc, "docs/sample.md");
     expect(selectNextTask(tasks, null)?.id).toBe("TASK-003");
@@ -138,6 +152,20 @@ describe("task parsing and selection", () => {
     );
     const universe = mergeTaskUniverses(pluginTasks, serverTasks);
     expect(selectNextTask(pluginTasks, null, universe)?.id).toBe("PLG-001");
+  });
+
+  it("keeps cross-doc tasks blocked until dependency sources are done", () => {
+    const pluginTasks = parseTaskFile(
+      `### Plugin Task\n- **ID**: \`PLG-001\`\n- **Status**: \`pending\`\n- **Priority**: P0\n- **Depends on**: SRV-001\n`,
+      "docs/plugin.md",
+    );
+    const serverTasks = parseTaskFile(
+      `### Server Task\n- **ID**: \`SRV-001\`\n- **Status**: \`pending\`\n- **Priority**: P0\n- **Depends on**: None\n`,
+      "docs/server.md",
+    );
+
+    const universe = mergeTaskUniverses(pluginTasks, serverTasks);
+    expect(selectNextTask(pluginTasks, null, universe)).toBeNull();
   });
 
   it("renders a prompt without requiring instruction files", () => {

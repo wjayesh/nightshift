@@ -48,26 +48,41 @@ function createTaskDoc(taskId: string, title: string): string {
 }
 
 function createWorkflow(taskSource: string): string {
-  return `---
-name: cli-test
-task_sources:
-  - ${taskSource}
-progress_file: .orchestrator/progress.md
-state_file: .orchestrator/state.json
-workspace_root: .orchestrator/workspaces
-workspace_mode: shared
-agent_command: "${RUNTIME_BINARY}"
-agent_args:
-  - fake-agent.cjs
-max_iterations: 10
-poll_interval_seconds: 0
-completion_phrase: COMPLETE
-auto_commit_on_done: false
-auto_push_every_commits: 0
----
-# Workflow
-Exercise the standalone CLI entrypoint.
-`;
+  return createWorkflowWithDependencies(taskSource);
+}
+
+function createWorkflowWithDependencies(
+  taskSource: string,
+  dependencySources: string[] = [],
+): string {
+  return [
+    "---",
+    "name: cli-test",
+    "task_sources:",
+    `  - ${taskSource}`,
+    ...(dependencySources.length > 0
+      ? [
+          "dependency_sources:",
+          ...dependencySources.map((dependency) => `  - ${dependency}`),
+        ]
+      : []),
+    "progress_file: .orchestrator/progress.md",
+    "state_file: .orchestrator/state.json",
+    "workspace_root: .orchestrator/workspaces",
+    "workspace_mode: shared",
+    `agent_command: "${RUNTIME_BINARY}"`,
+    "agent_args:",
+    "  - fake-agent.cjs",
+    "max_iterations: 10",
+    "poll_interval_seconds: 0",
+    "completion_phrase: COMPLETE",
+    "auto_commit_on_done: false",
+    "auto_push_every_commits: 0",
+    "---",
+    "# Workflow",
+    "Exercise the standalone CLI entrypoint.",
+    "",
+  ].join("\n");
 }
 
 function createTempRepo(): string {
@@ -162,6 +177,46 @@ describe("standalone orchestrator CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("- Task: TASK-ALT");
     expect(result.stdout).not.toContain("- Task: TASK-001");
+  });
+
+  it("uses workflow dependency_sources during task selection", () => {
+    const repoRoot = createTempRepo();
+
+    writeFileSync(
+      join(repoRoot, "docs/gated-tasks.md"),
+      `### Gated Task
+- **ID**: \`APP-001\`
+- **Status**: \`pending\`
+- **Priority**: P0
+- **Depends on**: CORE-001
+`,
+    );
+    writeFileSync(
+      join(repoRoot, "docs/dependencies.md"),
+      `### Core Task
+- **ID**: \`CORE-001\`
+- **Status**: \`done\`
+- **Priority**: P0
+- **Depends on**: None
+`,
+    );
+    writeFileSync(
+      join(repoRoot, "WORKFLOW.deps.md"),
+      createWorkflowWithDependencies("docs/gated-tasks.md", [
+        "docs/dependencies.md",
+      ]),
+    );
+
+    const result = runCli(repoRoot, [
+      "--once",
+      "--dry-run",
+      "--workflow",
+      "WORKFLOW.deps.md",
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("- Task: APP-001");
+    expect(result.stdout).toContain("- Depends on: CORE-001");
   });
 
   it("skips final push when auto-push is disabled", () => {

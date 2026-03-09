@@ -136,17 +136,21 @@ Add first-class decision logging so agents can record key implementation choices
 ### 1.5 Preserve dependency-aware scheduling
 
 - **ID**: `ORCH-014`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-010
+- **Notes**:
+  - 2026-03-10: Auditing the standalone scheduler to prove `Depends on` parsing and workflow-level `dependency_sources` gating with focused tests.
+  - 2026-03-10: Confirmed the extracted scheduler still honors comma-separated `Depends on` metadata, blocks unfinished cross-doc prerequisites, and consumes workflow `dependency_sources` during real CLI task selection without additional core changes.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-cli.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check tests/unit/orchestrator.test.ts tests/unit/orchestrator-cli.test.ts docs/tasks-standalone-orchestrator.md`.
 
 Keep doc-based dependency ordering as a core feature.
 
 **Acceptance Criteria**
 
-- [ ] `Depends on` metadata is supported
-- [ ] Cross-doc dependency sources are supported
-- [ ] Behavior is tested
+- [x] `Depends on` metadata is supported
+- [x] Cross-doc dependency sources are supported
+- [x] Behavior is tested
 
 ### 1.6 Preserve git integration cadence
 
