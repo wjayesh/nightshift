@@ -782,7 +782,7 @@ export function buildTaskPrompt(
     "",
     "Execution rules:",
     `1. Work only on the assigned task (${task.id}) and any strictly necessary dependencies inside the same repo.`,
-    `2. Update the task status in ${task.filePath} to \`in-progress\` or \`done\` as appropriate.`,
+    `2. Do not edit task-tracker status metadata in ${task.filePath}; leave the assigned task's \`Status\` line unchanged and let the orchestrator record terminal \`done\` or \`blocked\` status on the integration branch.`,
     `3. Update ${config.decisionFile} if you make or revise a consequential implementation decision.`,
     "4. Do not edit the orchestrator progress/state files directly; the orchestrator records runtime progress for you.",
     "5. Run the most relevant tests or validation commands for the files you changed when feasible.",
@@ -1042,6 +1042,80 @@ export function getHeadCommit(repoPath: string): string | null {
   return sha.length > 0 ? sha : null;
 }
 
+type TaskTrackerUpdateResult = {
+  updated: boolean;
+  previousStatus: TaskStatus | null;
+};
+
+function updateTaskStatusInTaskSource(
+  repoRoot: string,
+  task: Pick<Task, "id" | "filePath">,
+  nextStatus: TaskStatus,
+): TaskTrackerUpdateResult {
+  const taskSourcePath = resolvePath(repoRoot, task.filePath);
+  const lines = readFileSync(taskSourcePath, "utf8").split(/\r?\n/);
+  let foundTaskId = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^(#{2,6})\s+/.test(line) && foundTaskId) {
+      break;
+    }
+
+    const idMatch = line.match(/^\s*-\s+\*\*ID\*\*:\s+`?([^`\n]+)`?/);
+    if (!foundTaskId) {
+      if (idMatch && idMatch[1].trim() === task.id) {
+        foundTaskId = true;
+      }
+      continue;
+    }
+
+    const statusMatch = line.match(
+      /^(\s*-\s+\*\*Status\*\*:\s+)(`?)([^`\n]+)(`?)(.*)$/,
+    );
+    if (!statusMatch) {
+      continue;
+    }
+
+    const currentStatus = normalizeStatus(statusMatch[3] ?? null);
+    if (currentStatus === nextStatus) {
+      return {
+        updated: false,
+        previousStatus: currentStatus,
+      };
+    }
+
+    const usesBackticks = statusMatch[2] === "`" || statusMatch[4] === "`";
+    lines[index] =
+      `${statusMatch[1]}${usesBackticks ? "`" : ""}${nextStatus}${usesBackticks ? "`" : ""}${statusMatch[5]}`;
+    writeFileSync(taskSourcePath, lines.join("\n"));
+    return {
+      updated: true,
+      previousStatus: currentStatus,
+    };
+  }
+
+  if (!foundTaskId) {
+    throw new Error(`${task.id} is not present in ${task.filePath}.`);
+  }
+
+  throw new Error(
+    `${task.id} in ${task.filePath} is missing a Status metadata line.`,
+  );
+}
+
+function restoreTaskStatusMetadata(
+  repoRoot: string,
+  task: Pick<Task, "id" | "filePath" | "status">,
+  observedStatus: TaskStatus,
+) {
+  if (observedStatus === task.status) {
+    return;
+  }
+
+  updateTaskStatusInTaskSource(repoRoot, task, task.status);
+}
+
 export function listUniqueCommits(repoPath: string, baseRef: string): string[] {
   const cherryResult = runGit(["cherry", baseRef, "HEAD"], repoPath);
   if (cherryResult.status !== 0) {
@@ -1118,7 +1192,7 @@ function assertCleanIntegrationCheckout(
   }
 
   throw new Error(
-    `${subject} cannot cherry-pick into ${integrationBranch} because the shared integration checkout has uncommitted changes: ${summarizeDirtyCheckout(dirtyEntries)}. Clean or commit those paths and rerun.`,
+    `${subject} cannot update ${integrationBranch} because the shared integration checkout has uncommitted changes: ${summarizeDirtyCheckout(dirtyEntries)}. Clean or commit those paths and rerun.`,
   );
 }
 
@@ -1162,6 +1236,78 @@ export function commitPendingChanges(
     commitSha: getHeadCommit(repoPath),
     error: null,
   };
+}
+
+function commitTrackedPathChange(
+  repoPath: string,
+  filePath: string,
+  message: string,
+  options: { amend?: boolean } = {},
+): RepoCommitResult {
+  const addResult = runGit(["add", "--", filePath], repoPath);
+  if (addResult.status !== 0) {
+    return {
+      committed: false,
+      commitSha: null,
+      error: gitError(addResult, "git add failed"),
+    };
+  }
+
+  const diffResult = runGit(["diff", "--cached", "--quiet"], repoPath);
+  if (diffResult.status === 0) {
+    return { committed: false, commitSha: null, error: null };
+  }
+  if (diffResult.status !== 1) {
+    return {
+      committed: false,
+      commitSha: null,
+      error: gitError(diffResult, "git diff --cached failed"),
+    };
+  }
+
+  const commitArgs = options.amend
+    ? ["commit", "--amend", "--no-edit"]
+    : ["commit", "-m", message];
+  const commitResult = runGit(commitArgs, repoPath);
+  if (commitResult.status !== 0) {
+    return {
+      committed: false,
+      commitSha: null,
+      error: gitError(commitResult, "git commit failed"),
+    };
+  }
+
+  return {
+    committed: true,
+    commitSha: getHeadCommit(repoPath),
+    error: null,
+  };
+}
+
+function recordTerminalTaskStatusOnIntegrationBranch(params: {
+  repoRoot: string;
+  task: Pick<Task, "id" | "filePath">;
+  terminalStatus: "completed" | "blocked";
+  commitMessage: string;
+  amendExistingCommit: boolean;
+}): RepoCommitResult {
+  const { repoRoot, task, terminalStatus, commitMessage, amendExistingCommit } =
+    params;
+  const nextStatus: TaskStatus =
+    terminalStatus === "completed" ? "done" : "blocked";
+  const statusUpdateResult = updateTaskStatusInTaskSource(
+    repoRoot,
+    task,
+    nextStatus,
+  );
+
+  if (!statusUpdateResult.updated) {
+    return { committed: false, commitSha: null, error: null };
+  }
+
+  return commitTrackedPathChange(repoRoot, task.filePath, commitMessage, {
+    amend: amendExistingCommit,
+  });
 }
 
 export function cherryPickCommits(
@@ -1681,14 +1827,12 @@ function findTaskById(tasks: Task[], taskId: string): Task | null {
   return tasks.find((task) => task.id === taskId) ?? null;
 }
 
-function didTaskComplete(task: Task, lastMessage: string): boolean {
-  return task.status === "done" || lastMessage.includes(`TASK_DONE ${task.id}`);
+function didTaskComplete(taskId: string, lastMessage: string): boolean {
+  return lastMessage.includes(`TASK_DONE ${taskId}`);
 }
 
-function didTaskBlock(task: Task, lastMessage: string): boolean {
-  return (
-    task.status === "blocked" || lastMessage.includes(`TASK_BLOCKED ${task.id}`)
-  );
+function didTaskBlock(taskId: string, lastMessage: string): boolean {
+  return lastMessage.includes(`TASK_BLOCKED ${taskId}`);
 }
 
 function extractBlockedReason(taskId: string, lastMessage: string): string {
@@ -2114,7 +2258,11 @@ function integrateTerminalTask(params: {
     );
   }
 
+  const rootTask = findTaskById(rootActionableTasks, task.id) ?? task;
+  const desiredStatus: TaskStatus =
+    terminalStatus === "completed" ? "done" : "blocked";
   const workspace = ensureWorkspace(repoRoot, workflow, task);
+  restoreTaskStatusMetadata(workspace.path, rootTask, task.status);
   const commitVerb = terminalStatus === "completed" ? "complete" : "block";
   const commitMessage = `orchestrator: ${commitVerb} ${task.id} ${task.title}`;
   const commitResult = commitPendingChanges(workspace.path, commitMessage);
@@ -2129,32 +2277,44 @@ function integrateTerminalTask(params: {
     workspace.kind === "shared" &&
     currentWorkspaceBranch === integrationBranch
   ) {
+    const trackerCommitResult = recordTerminalTaskStatusOnIntegrationBranch({
+      repoRoot,
+      task: rootTask,
+      terminalStatus,
+      commitMessage,
+      amendExistingCommit: commitResult.committed,
+    });
+    if (trackerCommitResult.error) {
+      throw new Error(
+        `${task.id} could not update root task status on ${integrationBranch}: ${trackerCommitResult.error}`,
+      );
+    }
+
     const refreshedActionableTasks = loadTasks(repoRoot, workflow.taskSources);
     const refreshedTask = findTaskById(refreshedActionableTasks, task.id);
     const terminalLabel =
       terminalStatus === "completed" ? "completed" : "blocked";
+    const finalCommitSha =
+      trackerCommitResult.commitSha ?? commitResult.commitSha;
+    const committedDirectly =
+      commitResult.committed || trackerCommitResult.committed;
 
-    if (terminalStatus === "completed" && refreshedTask?.status !== "done") {
+    if (refreshedTask?.status !== desiredStatus) {
       throw new Error(
-        `${task.id} committed directly on ${integrationBranch} but root task status is not done.`,
+        `${task.id} committed directly on ${integrationBranch} but root task status is not ${desiredStatus}.`,
       );
     }
-    if (terminalStatus === "blocked" && refreshedTask?.status !== "blocked") {
-      throw new Error(
-        `${task.id} committed directly on ${integrationBranch} but root task status is not blocked.`,
-      );
-    }
 
-    let historyNote = commitResult.committed
+    let historyNote = committedDirectly
       ? `${task.id} ${terminalLabel} and committed directly on ${integrationBranch}${
-          commitResult.commitSha ? ` as ${commitResult.commitSha}` : ""
+          finalCommitSha ? ` as ${finalCommitSha}` : ""
         }.`
       : `${task.id} already reflected on ${integrationBranch}; no direct commit needed.`;
 
-    if (commitResult.committed) {
+    if (committedDirectly) {
       state.commitsSincePush += 1;
       state.lastCommittedTaskId = task.id;
-      state.lastCommitSha = commitResult.commitSha;
+      state.lastCommitSha = finalCommitSha;
     }
 
     const shouldPush =
@@ -2184,18 +2344,82 @@ function integrateTerminalTask(params: {
   try {
     const uniqueCommits = listUniqueCommits(workspace.path, integrationBranch);
     if (uniqueCommits.length === 0) {
-      const rootTask = findTaskById(rootActionableTasks, task.id);
-      const rootAlreadyMatches =
-        (terminalStatus === "completed" && rootTask?.status === "done") ||
-        (terminalStatus === "blocked" && rootTask?.status === "blocked");
-      if (!rootAlreadyMatches) {
+      if (rootTask.status === desiredStatus) {
+        return {
+          historyNote: `${task.id} already reflected on ${integrationBranch}; no new commits to integrate.`,
+          refreshedActionableTasks: rootActionableTasks,
+        };
+      }
+
+      if (workspace.kind === "git_worktree") {
+        assertCleanIntegrationCheckout(repoRoot, integrationBranch, task.id);
+      }
+
+      const trackerCommitResult = recordTerminalTaskStatusOnIntegrationBranch({
+        repoRoot,
+        task: rootTask,
+        terminalStatus,
+        commitMessage,
+        amendExistingCommit: false,
+      });
+      if (trackerCommitResult.error) {
         throw new Error(
-          `${task.id} reached ${terminalStatus} but produced no new task-branch commits to integrate.`,
+          `${task.id} could not update root task status on ${integrationBranch}: ${trackerCommitResult.error}`,
         );
       }
+
+      const refreshedActionableTasks = loadTasks(
+        repoRoot,
+        workflow.taskSources,
+      );
+      const refreshedTask = findTaskById(refreshedActionableTasks, task.id);
+      if (refreshedTask?.status !== desiredStatus) {
+        throw new Error(
+          `${task.id} recorded directly on ${integrationBranch} but root task status is not ${desiredStatus}.`,
+        );
+      }
+
+      if (trackerCommitResult.committed) {
+        state.commitsSincePush += 1;
+        state.lastCommittedTaskId = task.id;
+        state.lastCommitSha = trackerCommitResult.commitSha;
+      }
+
+      const terminalLabel =
+        terminalStatus === "completed" ? "completed" : "blocked";
+      let historyNote = trackerCommitResult.committed
+        ? `${task.id} ${terminalLabel} and updated ${integrationBranch}${
+            trackerCommitResult.commitSha
+              ? ` as ${trackerCommitResult.commitSha}`
+              : ""
+          }.`
+        : `${task.id} already reflected on ${integrationBranch}; no new commits to integrate.`;
+
+      const shouldPush =
+        isAutoPushEnabled(workflow) &&
+        state.commitsSincePush > 0 &&
+        (state.commitsSincePush >= workflow.autoPushEveryCommits ||
+          areAllTasksComplete(refreshedActionableTasks));
+
+      if (shouldPush) {
+        const pushResult = maybePushBranch(
+          repoRoot,
+          integrationBranch,
+          state.commitsSincePush,
+          true,
+        );
+        if (pushResult.error) {
+          throw new Error(
+            `${historyNote} Auto-push failed: ${pushResult.error}`,
+          );
+        }
+        state.commitsSincePush = 0;
+        historyNote = `${historyNote} Pushed ${integrationBranch}.`;
+      }
+
       return {
-        historyNote: `${task.id} already reflected on ${integrationBranch}; no new commits to integrate.`,
-        refreshedActionableTasks: rootActionableTasks,
+        historyNote,
+        refreshedActionableTasks,
       };
     }
 
@@ -2210,9 +2434,23 @@ function integrateTerminalTask(params: {
       );
     }
 
+    const trackerCommitResult = recordTerminalTaskStatusOnIntegrationBranch({
+      repoRoot,
+      task: rootTask,
+      terminalStatus,
+      commitMessage,
+      amendExistingCommit: true,
+    });
+    if (trackerCommitResult.error) {
+      throw new Error(
+        `${task.id} could not update root task status on ${integrationBranch}: ${trackerCommitResult.error}`,
+      );
+    }
+
     state.commitsSincePush += cherryPickResult.commitCount;
     state.lastCommittedTaskId = task.id;
-    state.lastCommitSha = cherryPickResult.lastCommitSha;
+    state.lastCommitSha =
+      trackerCommitResult.commitSha ?? cherryPickResult.lastCommitSha;
 
     const refreshedActionableTasks = loadTasks(repoRoot, workflow.taskSources);
     const refreshedTask = findTaskById(refreshedActionableTasks, task.id);
@@ -2220,7 +2458,7 @@ function integrateTerminalTask(params: {
       terminalStatus === "completed" ? "completed" : "blocked";
     let historyNote = `${task.id} ${terminalLabel} and integrated ${cherryPickResult.commitCount} commit${
       cherryPickResult.commitCount === 1 ? "" : "s"
-    }${cherryPickResult.lastCommitSha ? ` as ${cherryPickResult.lastCommitSha}` : ""}.`;
+    }${state.lastCommitSha ? ` as ${state.lastCommitSha}` : ""}.`;
 
     const shouldPush =
       isAutoPushEnabled(workflow) &&
@@ -2241,14 +2479,9 @@ function integrateTerminalTask(params: {
       historyNote = `${historyNote} Pushed ${integrationBranch}.`;
     }
 
-    if (terminalStatus === "completed" && refreshedTask?.status !== "done") {
+    if (refreshedTask?.status !== desiredStatus) {
       throw new Error(
-        `${task.id} integrated successfully but root task status is not done.`,
-      );
-    }
-    if (terminalStatus === "blocked" && refreshedTask?.status !== "blocked") {
-      throw new Error(
-        `${task.id} integrated successfully but root task status is not blocked.`,
+        `${task.id} integrated successfully but root task status is not ${desiredStatus}.`,
       );
     }
 
@@ -2410,15 +2643,21 @@ export function runOrchestratorLoop(
           workspace.path,
           workflow.taskSources,
         );
+        const rootTask = findTaskById(actionable, task.id) ?? task;
         const workspaceTask =
-          findTaskById(workspaceActionableTasks, task.id) ?? task;
+          findTaskById(workspaceActionableTasks, task.id) ?? rootTask;
+        restoreTaskStatusMetadata(
+          workspace.path,
+          rootTask,
+          workspaceTask.status,
+        );
 
         if (runResult.exitCode !== 0) {
           historyStatus = "agent_error";
           historyNote = `Agent command failed: ${runResult.commandLine}`;
           state.activeTaskId = null;
           stopAfterIteration = true;
-        } else if (didTaskComplete(workspaceTask, runResult.lastMessage)) {
+        } else if (didTaskComplete(task.id, runResult.lastMessage)) {
           historyStatus = "completed";
           state.activeTaskId = null;
           const integrationResult = integrateTerminalTask({
@@ -2431,7 +2670,7 @@ export function runOrchestratorLoop(
           });
           refreshedActionableTasks = integrationResult.refreshedActionableTasks;
           historyNote = integrationResult.historyNote;
-        } else if (didTaskBlock(workspaceTask, runResult.lastMessage)) {
+        } else if (didTaskBlock(task.id, runResult.lastMessage)) {
           historyStatus = "blocked";
           state.activeTaskId = null;
           const integrationResult = integrateTerminalTask({
@@ -2449,7 +2688,7 @@ export function runOrchestratorLoop(
           }
         } else {
           historyStatus = "continued";
-          historyNote = `${task.id} remains ${workspaceTask.status}.`;
+          historyNote = `${task.id} remains active.`;
           state.activeTaskId = task.id;
         }
 

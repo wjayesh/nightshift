@@ -208,6 +208,13 @@ describe("task parsing and selection", () => {
     expect(prompt).toContain(
       "Update docs/decisions.md if you make or revise a consequential implementation decision.",
     );
+    expect(prompt).toContain(
+      "Do not edit task-tracker status metadata in docs/tasks.md",
+    );
+    expect(prompt).toContain(
+      "let the orchestrator record terminal `done` or `blocked` status on the integration branch.",
+    );
+    expect(prompt).not.toContain("Update the task status in docs/tasks.md");
     expect(prompt).toContain("Task ID: ORCH-010");
   });
 });

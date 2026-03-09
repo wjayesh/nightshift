@@ -258,9 +258,10 @@ Define how reviewer-created follow-up tasks are inserted and prioritized.
 - **ID**: `ORCH-032`
 - **Status**: `pending`
 - **Priority**: P1
-- **Depends on**: ORCH-040, ORCH-041, ORCH-042, ORCH-043, ORCH-044, ORCH-045
+- **Depends on**: ORCH-040, ORCH-041, ORCH-042, ORCH-043, ORCH-044, ORCH-045, ORCH-046, ORCH-047
 - **Notes**:
   - 2026-03-10: Expanded the broad crash-hardening goal into concrete runtime tasks `ORCH-040` through `ORCH-045` after reviewing the hardened Mahilo 2 orchestrator behavior.
+  - 2026-03-10: Added `ORCH-046` and `ORCH-047` after reviewing the Mahilo 2 stale-branch fix; the standalone hardening umbrella now also includes tracker-owned status updates and stale workspace refresh recovery.
 
 Add restart-friendly supervision for long-running loops.
 
@@ -327,6 +328,26 @@ Refuse git-worktree integration when the shared integration checkout has uncommi
 - [x] Shared-workspace direct-commit mode is not blocked by this guard
 - [x] Behavior is covered by focused tests
 
+### 4.2a Move tracker status updates into the orchestrator
+
+- **ID**: `ORCH-046`
+- **Status**: `done`
+- **Priority**: P0
+- **Depends on**: ORCH-011
+- **Notes**:
+  - 2026-03-10: Port the Mahilo 2 fix that stops task workers from editing tracker status metadata directly and makes the orchestrator record `done` or `blocked` on the integration branch after successful integration.
+  - 2026-03-10: Updated task prompts to forbid worker status-line edits, reverted any worker tracker-status mutations before task commits, and made the orchestrator record terminal `done` or `blocked` on the integration branch after terminal integration.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-review-loop.test.ts tests/unit/orchestrator-git-integration.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts tests/unit/orchestrator.test.ts tests/unit/orchestrator-git-integration.test.ts docs/tasks-standalone-orchestrator.md docs/decisions.md`.
+
+Make the orchestrator, not the worker, responsible for task status mutations in the task source docs.
+
+**Acceptance Criteria**
+
+- [x] Task prompts explicitly forbid worker edits to task-tracker status metadata
+- [x] Successful terminal integration updates the source task status on the integration branch
+- [x] Tracker updates work for both `done` and `blocked` outcomes
+- [x] Focused tests cover the tracker update path
+
 ### 4.3 Add non-fatal retries and backoff
 
 - **ID**: `ORCH-042`
@@ -342,6 +363,24 @@ Keep runtime, agent, and integration failures from killing the whole loop on the
 - [ ] Agent, runtime, and integration failures leave the task `pending` unless the worker explicitly says `TASK_BLOCKED`
 - [ ] Retry timing and failure counts are persisted in orchestrator state
 - [ ] Progress and state make retry behavior easy to inspect later
+
+### 4.3a Refresh stale task workspaces and recover from conflict
+
+- **ID**: `ORCH-047`
+- **Status**: `pending`
+- **Priority**: P0
+- **Depends on**: ORCH-042, ORCH-046
+- **Notes**:
+  - 2026-03-10: Port the Mahilo 2 stale-worktree fix that refreshes task branches from the latest integration branch and treats cherry-pick content conflicts as workspace-refresh recovery instead of generic retry.
+
+Refresh stale task branches from the latest integration branch instead of rerunning the same drifted workspace forever.
+
+**Acceptance Criteria**
+
+- [ ] The orchestrator can remove and recreate a task workspace from the latest integration branch when marked stale
+- [ ] Cherry-pick content conflicts mark the workspace stale and schedule a rerun on a fresh base instead of repeating the same stale retry
+- [ ] Idle task workspaces with no unique commits or pending changes can be refreshed when integration moves forward
+- [ ] Focused tests cover conflict-triggered refresh and rerun behavior
 
 ### 4.4 Add runtime heartbeat and status files
 

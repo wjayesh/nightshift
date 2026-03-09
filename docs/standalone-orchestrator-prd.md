@@ -192,7 +192,9 @@ After the review loop and baseline adoption flow are in place, the next hardenin
 
 - workflow-scoped worker locks so duplicate loops for the same workflow fail fast
 - dirty integration guards so cherry-picks do not run into a locally modified shared checkout
+- orchestrator-owned tracker status updates so workers do not create avoidable task-doc conflicts
 - non-fatal retries and backoff for agent, runtime, and integration failures
+- stale-workspace refresh and conflict recovery so drifted task branches are rebuilt from the latest integration branch
 - runtime heartbeat and status files for operator inspection
 - a lightweight standalone supervisor that restarts stalled or dead workers
 - optional macOS `launchd` support for long-running personal use

@@ -53,3 +53,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: Task and review worktrees cherry-pick back into one shared integration checkout, so unrelated local edits there can break integration or produce misleading mixed results, while shared-workspace mode commits directly in place and treats local dirt as part of the working set.
 - Decision: Before any git-worktree cherry-pick into the shared integration checkout, inspect `git status --porcelain` and fail fast with a concise dirty-path summary, but leave shared-workspace direct commits unchanged.
 - Impact: Operators now get a clear cleanup action when the integration checkout is dirty, and shared mode keeps its current direct-commit behavior instead of being blocked by a guard designed for worktree reconciliation.
+
+## 2026-03-10 - ORCH-046 - Keep terminal task status mutations on the orchestrator
+
+- Context: Letting task workers edit `Status` lines directly creates avoidable task-doc conflicts between task branches and the shared integration checkout, especially once the standalone loop is integrating work through a single branch.
+- Decision: Make workers report terminal outcomes only through `TASK_DONE` or `TASK_BLOCKED`, revert any worker-side status-line edits before committing task work, and let the orchestrator write `done` or `blocked` to the source task doc on the integration branch after successful terminal integration. When integration already produced a commit, fold the tracker update into that integrated head so normal task completion does not add an extra tracker-only commit.
+- Impact: Task source docs now get terminal status only from the orchestrator, blocked tasks with no code changes still land a tracker update on the integration branch, and the shared/git-worktree test coverage now exercises both `done` and `blocked` tracker updates.
