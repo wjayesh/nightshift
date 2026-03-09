@@ -1,22 +1,229 @@
-# Mahilo Registry
+# Standalone Orchestrator
 
-A trusted inter-agent communication protocol that enables AI agents from different users and frameworks to communicate securely.
+A small, repo-native autonomous coding loop you can copy into another project.
+It keeps planning and execution in markdown, selects the next ready task from
+`Depends on`, runs one task at a time, and preserves operational memory in
+repo-owned files instead of a database or hosted tracker.
 
-## Standalone Orchestrator Runtime Artifacts
+This repository is still the extraction workspace inside Mahilo. That means the
+standalone examples here use `WORKFLOW.orchestrator.md` and
+`docs/tasks-standalone-orchestrator.md`, because the root `WORKFLOW.md` is
+already used by Mahilo's existing server workflow. In a copied standalone repo,
+the default shape is `WORKFLOW.md`, `docs/tasks.md`, `docs/decisions.md`, and
+`.orchestrator/`.
 
-This repo also contains the extracted standalone orchestrator core in `src/orchestrator.ts` and `scripts/orchestrator.ts`. Its runtime files are intentionally durable, repo-owned artifacts rather than throwaway temp output:
+## Core Mental Model
 
-- `progress.md` is an append-only loop log so you can inspect what the orchestrator did between runs.
-- `state.json` persists loop state such as iteration count, active task, and integration cadence so a restart can resume predictably.
-- `<task-id>-last-message.txt` stores the terminal agent message for each task so completion or block outcomes remain inspectable after the process exits.
+The repo is the control plane.
 
-These files are part of the product surface. They preserve operational memory inside the repo and make autonomous runs auditable without a database or external service.
+- The workflow file defines where tasks live, which instruction docs should be
+  read first, where runtime artifacts are written, which agent command to run,
+  which workspace mode to use, and how git integration should behave.
+- Task docs stay hand-editable markdown. The orchestrator only needs `ID`,
+  `Status`, `Priority`, and `Depends on`.
+- The scheduler only picks ready tasks. A task is ready when its dependencies
+  are already `done`.
+- One workflow works on one active task at a time.
+- Runtime artifacts under `.orchestrator/` are part of the product surface, not
+  throwaway temp files.
+- Consequential choices go into a decision log that stays readable in git
+  history.
+- Terminal task outcomes are committed deliberately, and pushing is controlled
+  by an explicit cadence instead of happening accidentally.
 
-### Decision Log
+## Quick Start
 
-The standalone workflow also supports a repo-owned decision log via `decision_file` in workflow front matter. The default shape is `docs/decisions.md`: a durable markdown record for consequential implementation choices that should outlive a single agent run.
+### Prerequisites
 
-Each decision entry should stay easy to scan in plain git history:
+- Bun 1.0 or newer
+- Git
+- The agent CLI named in the workflow file on your `PATH`
+
+The extracted orchestrator itself only relies on Bun, Git, and the configured
+agent command. In this repo the standalone workflow uses `codex exec`.
+
+### Run The Standalone Workflow In This Repo
+
+Install dependencies:
+
+```bash
+bun install
+```
+
+Preview the next ready task without running the agent:
+
+```bash
+bun run scripts/orchestrator.ts --workflow WORKFLOW.orchestrator.md --once --dry-run
+```
+
+Run a single live iteration:
+
+```bash
+bun run scripts/orchestrator.ts --workflow WORKFLOW.orchestrator.md --once
+```
+
+Run the loop continuously until completion or `max_iterations`:
+
+```bash
+bun run scripts/orchestrator.ts --workflow WORKFLOW.orchestrator.md
+```
+
+`--dry-run` is the safest first check. It confirms that the workflow file
+loads, task parsing works, dependencies resolve, and the prompt can be built for
+the next ready task.
+
+### CLI Flags
+
+```text
+Usage: bun run scripts/orchestrator.ts [options]
+
+Options:
+  --workflow <path>        Workflow file to load (default: WORKFLOW.md)
+  --max-iterations <n>     Override workflow max_iterations
+  --once                   Run a single loop iteration
+  --dry-run                Select a task and print a prompt preview without running the agent
+  --help                   Show this help text
+```
+
+In a copied repo, `WORKFLOW.md` becomes the default and you can drop the
+`--workflow` flag.
+
+## Workflow File
+
+The workflow file has two parts:
+
+- Front matter: machine-read configuration.
+- Body: human instructions that are injected into every task prompt.
+
+A copied standalone repo should look roughly like this:
+
+```md
+---
+name: autonomous-development
+task_sources:
+  - docs/tasks.md
+dependency_sources:
+  - docs/shared-dependencies.md
+instruction_files:
+  - docs/prd.md
+  - docs/engineering-rules.md
+decision_file: docs/decisions.md
+progress_file: .orchestrator/progress.md
+state_file: .orchestrator/state.json
+workspace_root: .orchestrator/workspaces
+workspace_mode: git_worktree
+agent_command: codex
+agent_args:
+  - exec
+max_iterations: 50
+poll_interval_seconds: 3
+completion_phrase: COMPLETE
+required_branch: autonomous/integration
+terminal_commit_behavior: per_task
+auto_push_every_commits: 3
+---
+
+# Autonomous Development Workflow
+
+Read the instruction files first.
+Update the task doc status as work progresses.
+Record consequential choices in the decision log.
+```
+
+The current extraction repo uses the same shape but points at
+`WORKFLOW.orchestrator.md`, `docs/tasks-standalone-orchestrator.md`, and
+suffixed runtime artifact names such as `.orchestrator/orchestrator-progress.md`
+to avoid colliding with Mahilo's existing workflows.
+
+Important front matter fields:
+
+- `task_sources`: task docs the orchestrator reads and expects the agent to
+  update.
+- `dependency_sources`: optional docs used only to satisfy `Depends on`
+  references across other files.
+- `instruction_files`: repo docs that must be read before the task section.
+- `decision_file`: markdown log for consequential implementation choices.
+- `progress_file` and `state_file`: durable runtime memory.
+- `workspace_root`: where shared workspaces or git worktrees live.
+- `workspace_mode`: `git_worktree` by default, `shared` as the escape hatch.
+- `agent_command` and `agent_args`: the exact agent invocation.
+- `completion_phrase`: phrase the agent should emit when all tracked tasks are
+  complete.
+- `required_branch`: optional guardrail that forces integration onto a specific
+  branch.
+- `terminal_commit_behavior`: currently `per_task`; every `done` or `blocked`
+  task is committed deliberately before integration.
+- `auto_push_every_commits`: push cadence. `3` is the recommended default, `0`
+  keeps integration commits local until a human pushes.
+
+## Task Docs And Dependency-Aware Scheduling
+
+Task docs stay intentionally simple. Each task is just a markdown heading plus a
+few metadata lines:
+
+```md
+### 2.1 Write setup and usage guide
+
+- **ID**: `ORCH-020`
+- **Status**: `pending`
+- **Priority**: P0
+- **Depends on**: ORCH-011, ORCH-012, ORCH-013
+
+Write a README that explains setup, workflow files, task docs, runtime
+artifacts, and how to copy the repo into a new project.
+```
+
+Supported status values are:
+
+- `pending`
+- `in-progress`
+- `review`
+- `blocked`
+- `done`
+
+Scheduling rules are straightforward:
+
+- The orchestrator reads every configured `task_sources` file.
+- It ignores tasks whose dependencies are not yet `done`.
+- It can also gate tasks on other docs listed in `dependency_sources`.
+- It keeps working the current active task until that task reaches a terminal
+  state or the agent exits without completing it.
+
+The goal is to keep task editing cheap. If a human can edit the markdown by
+hand, the orchestrator should still understand it.
+
+## Runtime Artifacts
+
+Runtime files are a first-class feature. They preserve operational memory
+between runs and make the loop inspectable without extra tooling.
+
+The standalone layout uses `.orchestrator/` for:
+
+- `progress.md`: append-only iteration log with task IDs, statuses, and notes.
+- `state.json`: persisted loop state such as iteration count, active task,
+  commit counters, and history.
+- `repo.lock`: short-lived lock used only around integration-branch mutation.
+- `<task-id>-last-message.txt`: the terminal agent message for each task.
+- `workspaces/`: shared task directories or git worktrees, depending on
+  `workspace_mode`.
+
+In this repo, the standalone workflow writes the same artifact types with
+workflow-specific filenames such as `orchestrator-progress.md` and
+`orchestrator-state.json`.
+
+## Decision Docs
+
+Decision logging is configured by `decision_file`. The default shape is a plain
+markdown log such as `docs/decisions.md`.
+
+Use it for choices that should outlive a single agent run:
+
+- changing workflow policy
+- changing task interpretation
+- choosing one implementation path over another
+- documenting why a workaround exists
+
+Recommended entry format:
 
 ```md
 ## YYYY-MM-DD - TASK-ID - Short decision title
@@ -26,495 +233,73 @@ Each decision entry should stay easy to scan in plain git history:
 - Impact: What should later readers expect because of it?
 ```
 
-That keeps the repo’s reasoning alongside its code and task docs, instead of burying important tradeoffs inside transient terminal output.
-
-### Git Integration Cadence
-
-The standalone orchestrator keeps terminal task reconciliation explicit rather than treating git history as a side effect.
-
-- `terminal_commit_behavior: per_task` is the v1 policy: when a task reaches `done` or `blocked`, the orchestrator makes a deliberate terminal commit before integrating that task onto the shared branch.
-- `auto_push_every_commits: 3` is the recommended standalone default. The orchestrator pushes after every three integrated task commits, and it also flushes any remaining integrated commits when the workflow completes.
-- Set `auto_push_every_commits: 0` when you want the orchestrator to keep integration commits local until a human reviews and pushes them manually.
-
-```md
-terminal_commit_behavior: per_task
-auto_push_every_commits: 3
-```
-
-`WORKFLOW.orchestrator.md` uses `auto_push_every_commits: 0` in this repo so standalone extraction work stays local until intentionally published.
-
-## Quick Start
-
-### Prerequisites
-
-- [Bun](https://bun.sh) v1.0.0 or later
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/your-org/mahilo-registry.git
-cd mahilo-registry
-
-# Install dependencies
-bun install
-
-# Run database migrations
-bun run db:migrate
-
-# Start the development server
-bun run dev
-```
-
-The server starts at `http://localhost:8080` with the API at `/api/v1`.
-
-### Using Docker
-
-```bash
-# Build the image
-docker build -t mahilo-registry .
-
-# Run the container
-docker run -d \
-  -p 8080:8080 \
-  -v mahilo-data:/app/data \
-  -e SECRET_KEY=your-secret-key \
-  mahilo-registry
-
-# Check health
-curl http://localhost:8080/health
-```
-
-## API Reference
-
-### Authentication
-
-All endpoints except `/api/v1/auth/register` require authentication via API key:
-
-```
-Authorization: Bearer mhl_<key_id>_<secret>
-```
-
-### Endpoints
-
-#### Auth
-
-| Method | Endpoint                  | Description           |
-| ------ | ------------------------- | --------------------- |
-| POST   | `/api/v1/auth/register`   | Register a new user   |
-| POST   | `/api/v1/auth/rotate-key` | Rotate API key        |
-| GET    | `/api/v1/auth/me`         | Get current user info |
-
-**Register a user:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username": "alice", "display_name": "Alice"}'
-```
-
-Response:
-
-```json
-{
-  "user_id": "abc123",
-  "username": "alice",
-  "api_key": "mhl_keyid_secret..."
-}
-```
-
-#### Agents
-
-| Method | Endpoint                  | Description                      |
-| ------ | ------------------------- | -------------------------------- |
-| POST   | `/api/v1/agents`          | Register/update agent connection |
-| GET    | `/api/v1/agents`          | List your agent connections      |
-| DELETE | `/api/v1/agents/:id`      | Delete an agent connection       |
-| POST   | `/api/v1/agents/:id/ping` | Test agent callback URL          |
-
-**Register an agent:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/agents \
-  -H "Authorization: Bearer mhl_..." \
-  -H "Content-Type: application/json" \
-  -d '{
-    "framework": "clawdbot",
-    "label": "work",
-    "callback_url": "https://your-agent.com/callback",
-    "public_key": "your-public-key",
-    "public_key_alg": "ed25519"
-  }'
-```
-
-#### Friends
-
-| Method | Endpoint                                 | Description                                                |
-| ------ | ---------------------------------------- | ---------------------------------------------------------- |
-| POST   | `/api/v1/friends/request`                | Send friend request                                        |
-| POST   | `/api/v1/friends/:id/accept`             | Accept friend request                                      |
-| POST   | `/api/v1/friends/:id/reject`             | Reject friend request                                      |
-| POST   | `/api/v1/friends/:id/block`              | Block a user                                               |
-| GET    | `/api/v1/friends`                        | List friends (query: `?status=accepted\|pending\|blocked`) |
-| DELETE | `/api/v1/friends/:id`                    | Unfriend/remove                                            |
-| GET    | `/api/v1/contacts/:username/connections` | Get friend's agent connections                             |
-
-**Send friend request:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/friends/request \
-  -H "Authorization: Bearer mhl_..." \
-  -H "Content-Type: application/json" \
-  -d '{"username": "bob"}'
-```
-
-#### Messages
-
-| Method | Endpoint                | Description                                                                       |
-| ------ | ----------------------- | --------------------------------------------------------------------------------- |
-| POST   | `/api/v1/messages/send` | Send message to a friend                                                          |
-| GET    | `/api/v1/messages`      | Get message history (query: `?direction=sent\|received&limit=50&since=timestamp`) |
-
-**Send a message:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/messages/send \
-  -H "Authorization: Bearer mhl_..." \
-  -H "Content-Type: application/json" \
-  -d '{
-    "recipient": "bob",
-    "message": "Hello from Alice!",
-    "context": "Casual greeting"
-  }'
-```
-
-Response:
-
-```json
-{
-  "message_id": "msg_xyz",
-  "status": "delivered"
-}
-```
-
-#### Policies
-
-| Method | Endpoint               | Description                                         |
-| ------ | ---------------------- | --------------------------------------------------- |
-| POST   | `/api/v1/policies`     | Create a policy                                     |
-| GET    | `/api/v1/policies`     | List policies (query: `?scope=global\|user\|group`) |
-| PATCH  | `/api/v1/policies/:id` | Update a policy                                     |
-| DELETE | `/api/v1/policies/:id` | Delete a policy                                     |
-
-**Create a policy:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/policies \
-  -H "Authorization: Bearer mhl_..." \
-  -H "Content-Type: application/json" \
-  -d '{
-    "scope": "global",
-    "policy_type": "heuristic",
-    "policy_content": "{\"maxLength\": 1000, \"blockedPatterns\": [\"credit card\"]}"
-  }'
-```
-
-#### Groups
-
-| Method | Endpoint                      | Description                            |
-| ------ | ----------------------------- | -------------------------------------- |
-| POST   | `/api/v1/groups`              | Create a new group                     |
-| GET    | `/api/v1/groups`              | List groups you belong to              |
-| GET    | `/api/v1/groups/:id`          | Get group details                      |
-| GET    | `/api/v1/groups/:id/members`  | List group members                     |
-| POST   | `/api/v1/groups/:id/invite`   | Invite a user to the group             |
-| POST   | `/api/v1/groups/:id/join`     | Join a group (public or accept invite) |
-| DELETE | `/api/v1/groups/:id/leave`    | Leave a group                          |
-| POST   | `/api/v1/groups/:id/transfer` | Transfer ownership                     |
-| DELETE | `/api/v1/groups/:id`          | Delete a group (owner only)            |
-
-**Create a group:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/groups \
-  -H "Authorization: Bearer mhl_..." \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "project-alpha",
-    "description": "Team for Project Alpha",
-    "invite_only": true
-  }'
-```
-
-Response:
-
-```json
-{
-  "group_id": "grp_abc123",
-  "name": "project-alpha",
-  "description": "Team for Project Alpha",
-  "invite_only": true,
-  "role": "owner"
-}
-```
-
-**Invite a user:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/groups/grp_abc123/invite \
-  -H "Authorization: Bearer mhl_..." \
-  -H "Content-Type: application/json" \
-  -d '{"username": "bob"}'
-```
-
-**Send a message to a group:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/messages/send \
-  -H "Authorization: Bearer mhl_..." \
-  -H "Content-Type: application/json" \
-  -d '{
-    "recipient": "grp_abc123",
-    "recipient_type": "group",
-    "message": "Hello team!"
-  }'
-```
-
-Response:
-
-```json
-{
-  "message_id": "msg_xyz",
-  "status": "delivered",
-  "recipients": 3,
-  "delivered": 3,
-  "pending": 0,
-  "failed": 0
-}
-```
-
-### Callback Format
-
-When Mahilo delivers a message to your agent, it sends:
-
-```
-POST <your_callback_url>
-Headers:
-  Content-Type: application/json
-  X-Mahilo-Signature: sha256=<hmac_signature>
-  X-Mahilo-Timestamp: <unix_timestamp>
-  X-Mahilo-Message-Id: <message_id>
-
-Body:
-{
-  "message_id": "msg_abc123",
-  "sender": "alice",
-  "sender_agent": "clawdbot",
-  "message": "Hello!",
-  "payload_type": "text/plain",
-  "timestamp": "2026-01-27T12:00:00Z"
-}
-```
-
-Verify the signature using your `callback_secret`:
-
-```javascript
-const crypto = require("crypto");
-const expectedSig = crypto
-  .createHmac("sha256", callbackSecret)
-  .update(`${timestamp}.${rawBody}`)
-  .digest("hex");
-const isValid = signature === `sha256=${expectedSig}`;
-```
-
-### Group Message Callback
-
-When Mahilo delivers a group message:
-
-```
-POST <your_callback_url>
-Headers:
-  Content-Type: application/json
-  X-Mahilo-Signature: sha256=<hmac_signature>
-  X-Mahilo-Timestamp: <unix_timestamp>
-  X-Mahilo-Message-Id: <message_id>
-  X-Mahilo-Delivery-Id: <delivery_id>
-  X-Mahilo-Group-Id: <group_id>
-
-Body:
-{
-  "message_id": "msg_abc123",
-  "delivery_id": "del_xyz",
-  "sender": "alice",
-  "sender_agent": "clawdbot",
-  "message": "Hello team!",
-  "payload_type": "text/plain",
-  "group_id": "grp_abc123",
-  "group_name": "project-alpha",
-  "timestamp": "2026-01-27T12:00:00Z"
-}
-```
-
-## WebSocket Notifications
-
-Connect to `/api/v1/notifications/ws?api_key=mhl_...` for real-time events.
-
-### Connection
-
-```javascript
-const ws = new WebSocket(
-  "ws://localhost:8080/api/v1/notifications/ws?api_key=mhl_...",
-);
-
-ws.onopen = () => {
-  console.log("Connected");
-};
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log("Event:", data);
-};
-```
-
-### Keepalive
-
-Send ping messages to maintain the connection:
-
-```javascript
-setInterval(() => {
-  ws.send(JSON.stringify({ type: "ping" }));
-}, 30000);
-```
-
-### Event Types
-
-| Event              | Description                     |
-| ------------------ | ------------------------------- |
-| `connection`       | Initial connection confirmation |
-| `message_received` | New message delivered           |
-| `delivery_status`  | Message delivery status update  |
-| `group_invite`     | Invited to a group              |
-| `group_join`       | User joined a group             |
-| `group_leave`      | User left a group               |
-| `friend_request`   | New friend request              |
-
-### Event Format
-
-```json
-{
-  "type": "message_received",
-  "timestamp": "2026-01-28T12:00:00Z",
-  "data": {
-    "message_id": "msg_abc123",
-    "sender": "alice",
-    "group_id": "grp_xyz"
-  }
-}
-```
-
-## talk_to_group Tool (Claude Plugin)
-
-For Claude plugins using Mahilo, the `talk_to_group` tool allows sending messages to groups:
-
-```json
-{
-  "name": "talk_to_group",
-  "description": "Send a message to a Mahilo group",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "group_id": {
-        "type": "string",
-        "description": "The group ID to send the message to"
-      },
-      "message": {
-        "type": "string",
-        "description": "The message content"
-      },
-      "context": {
-        "type": "string",
-        "description": "Optional context about the message"
-      }
-    },
-    "required": ["group_id", "message"]
-  }
-}
-```
-
-The plugin should translate this to a `POST /api/v1/messages/send` request:
-
-```json
-{
-  "recipient": "<group_id>",
-  "recipient_type": "group",
-  "message": "<message>",
-  "context": "<context>"
-}
-```
-
-## Configuration
-
-Environment variables:
-
-| Variable              | Default            | Description                            |
-| --------------------- | ------------------ | -------------------------------------- |
-| `PORT`                | 8080               | Server port                            |
-| `HOST`                | 0.0.0.0            | Server host                            |
-| `DATABASE_URL`        | ./data/mahilo.db   | SQLite database path                   |
-| `SECRET_KEY`          | (required in prod) | Secret key for signing                 |
-| `NODE_ENV`            | development        | Environment mode                       |
-| `MAX_PAYLOAD_SIZE`    | 32768              | Max message size (bytes)               |
-| `MAX_RETRIES`         | 5                  | Delivery retry attempts                |
-| `CALLBACK_TIMEOUT_MS` | 30000              | Callback timeout (ms)                  |
-| `ALLOW_PRIVATE_IPS`   | false              | Allow private IPs for callbacks        |
-| `TRUSTED_MODE`        | false              | Enable registry-side policy evaluation |
-
-## Development
-
-```bash
-# Start dev server with hot reload
-bun run dev
-
-# Run tests
-bun test
-
-# Lint code
-bun run lint
-
-# Format code
-bun run format
-
-# Generate database migrations
-bun run db:generate
-
-# Open Drizzle Studio
-bun run db:studio
-```
-
-## Tech Stack
-
-- **Runtime**: Bun
-- **HTTP Framework**: Hono
-- **Database**: SQLite via Drizzle ORM
-- **Testing**: Bun test runner
-- **Language**: TypeScript (strict)
-
-## Architecture
-
-```
-Client (Agent Plugin) ─── HTTP/HTTPS ───► Mahilo Registry
-                                              │
-                                              ├── Auth Service
-                                              ├── User/Agent Registry
-                                              ├── Message Router
-                                              ├── Policy Store
-                                              │
-                                              ▼
-                                          SQLite DB
-```
-
-See `docs/registry-design.md` for the full design specification.
-
-## License
-
-MIT
+The important part is not the exact template. The important part is that the
+repo keeps durable reasoning next to code and task history.
+
+## Review Cadence
+
+Review cadence is part of the standalone operating model, not an afterthought.
+The recommended default is to run a review after every 3 completed
+implementation tasks.
+
+The intended behavior is:
+
+- after every 3 completed implementation tasks, run a review pass
+- inspect the last 3 completed tasks together
+- create new high-priority follow-up tasks if acceptance criteria or behavior
+  were missed
+
+The current extraction repo documents this cadence in the PRD and workflow
+instructions, but dedicated scheduler automation for it is still a follow-up
+task. If you copy the repo today, keep the review policy explicit in your
+workflow body or instruction docs until a dedicated `review_every_tasks`
+workflow field lands.
+
+## Commit And Push Cadence
+
+Git behavior is explicit on purpose.
+
+- `terminal_commit_behavior: per_task` means every `done` or `blocked` task gets
+  a terminal commit before integration.
+- `auto_push_every_commits: 3` is the recommended default for a standalone repo.
+  It batches pushes without hiding work for too long.
+- `auto_push_every_commits: 0` disables automatic pushes and keeps integrated
+  commits local until a human decides to publish them.
+- `required_branch` can pin all integration onto a named branch instead of
+  whatever branch the loop happens to start from.
+
+This repo intentionally sets `auto_push_every_commits: 0` in
+`WORKFLOW.orchestrator.md` so standalone extraction work stays local until it is
+reviewed and pushed deliberately.
+
+## Copy This Into A New Repo
+
+The adoption model is intentionally small.
+
+1. Copy `src/orchestrator.ts` and `scripts/orchestrator.ts` into the new repo.
+2. Add a root `WORKFLOW.md` based on `WORKFLOW.orchestrator.md`.
+3. Create `docs/tasks.md` and `docs/decisions.md`.
+4. Point `task_sources`, `instruction_files`, and `decision_file` at docs that
+   make sense for the new project.
+5. Set `agent_command` and `agent_args` to the local agent CLI you actually use.
+6. Keep runtime output under `.orchestrator/`.
+7. Run `bun run scripts/orchestrator.ts --once --dry-run` before the first live
+   execution.
+
+What usually stays unchanged:
+
+- `src/orchestrator.ts`
+- `scripts/orchestrator.ts`
+- the `.orchestrator/` runtime layout
+
+What you usually edit per repo:
+
+- `WORKFLOW.md`
+- task docs under `docs/`
+- instruction docs
+- the decision log path, if you want a different location
+
+If your repo is comfortable with git worktrees, keep `workspace_mode` set to
+`git_worktree`. If not, start with `workspace_mode: shared` and switch later.
+The orchestrator is opinionated, but the amount of repo-specific adaptation is
+meant to stay small and visible.

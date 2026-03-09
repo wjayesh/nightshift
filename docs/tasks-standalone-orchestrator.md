@@ -177,20 +177,24 @@ Preserve and clarify the commit/push cadence behavior for standalone use.
 ### 2.1 Write setup and usage guide
 
 - **ID**: `ORCH-020`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-011, ORCH-012, ORCH-013, ORCH-014, ORCH-015
+- **Notes**:
+  - 2026-03-10: Started rewriting the root README into a standalone orchestrator guide that explains setup, workflow/task docs, runtime artifacts, adoption into a new repo, decision logging, review cadence, and git integration cadence.
+  - 2026-03-10: Replaced the mixed registry/standalone root README with a standalone guide that explains the core mental model, current extraction-repo commands, workflow/task doc structure, runtime artifacts, decision logging, review cadence expectations, commit/push cadence, and the copy-into-project boundary for a future standalone repo.
+  - 2026-03-10: Validation passed with `node node_modules/prettier/bin/prettier.cjs --check README.md docs/decisions.md docs/tasks-standalone-orchestrator.md` and `bun run scripts/orchestrator.ts --help`.
 
 Write a README that explains setup, workflow files, task docs, runtime artifacts, and how to copy the repo into a new project.
 
 **Acceptance Criteria**
 
-- [ ] README explains the core mental model
-- [ ] README includes quick start steps
-- [ ] README explains how to adapt the orchestrator in a new repo
-- [ ] README explains decision docs
-- [ ] README explains review cadence
-- [ ] README explains commit/push cadence
+- [x] README explains the core mental model
+- [x] README includes quick start steps
+- [x] README explains how to adapt the orchestrator in a new repo
+- [x] README explains decision docs
+- [x] README explains review cadence
+- [x] README explains commit/push cadence
 
 ### 2.2 Add example workflow and task docs
 
