@@ -23,6 +23,7 @@ export type WorkflowConfig = {
   taskSources: string[];
   dependencySources: string[];
   instructionFiles: string[];
+  decisionFile: string;
   progressFile: string;
   stateFile: string;
   workspaceRoot: string;
@@ -111,6 +112,7 @@ const DEFAULT_WORKFLOW: Omit<WorkflowConfig, "workflowBody" | "workflowPath"> =
     taskSources: ["docs/tasks.md"],
     dependencySources: [],
     instructionFiles: [],
+    decisionFile: "docs/decisions.md",
     progressFile: ".orchestrator/progress.md",
     stateFile: ".orchestrator/state.json",
     workspaceRoot: ".orchestrator/workspaces",
@@ -251,6 +253,10 @@ export function parseWorkflowFile(
       frontMatter.instruction_files,
       DEFAULT_WORKFLOW.instructionFiles,
     ),
+    decisionFile:
+      typeof frontMatter.decision_file === "string"
+        ? frontMatter.decision_file
+        : DEFAULT_WORKFLOW.decisionFile,
     progressFile:
       typeof frontMatter.progress_file === "string"
         ? frontMatter.progress_file
@@ -641,6 +647,12 @@ export function buildTaskPrompt(
       : "- None";
   const workspaceNote =
     workspacePath === process.cwd() ? "shared repo workspace" : workspacePath;
+  const decisionDocTemplate = [
+    `## YYYY-MM-DD - ${task.id} - Short decision title`,
+    "- Context: What constraint, tradeoff, or problem forced the choice?",
+    "- Decision: What you chose and why?",
+    "- Impact: What changes, follow-ups, or consequences should future readers expect?",
+  ].join("\n");
 
   return [
     `Workflow: ${config.name}`,
@@ -655,6 +667,13 @@ export function buildTaskPrompt(
     "Instruction files to read first:",
     instructionList,
     "",
+    "Decision doc:",
+    `- Path: ${config.decisionFile}`,
+    "- Update it when you make or revise a consequential implementation choice.",
+    "- Keep entries short and durable so later runs can understand the reasoning quickly.",
+    "- Use this format:",
+    decisionDocTemplate,
+    "",
     "Task section to implement:",
     `### ${task.heading}`,
     task.sectionBody,
@@ -662,11 +681,12 @@ export function buildTaskPrompt(
     "Execution rules:",
     `1. Work only on the assigned task (${task.id}) and any strictly necessary dependencies inside the same repo.`,
     `2. Update the task status in ${task.filePath} to \`in-progress\` or \`done\` as appropriate.`,
-    "3. Do not edit the orchestrator progress/state files directly; the orchestrator records runtime progress for you.",
-    "4. Run the most relevant tests or validation commands for the files you changed when feasible.",
-    `5. If the task is fully complete, say \`TASK_DONE ${task.id}\` in the final message.`,
-    `6. If the task is blocked, say \`TASK_BLOCKED ${task.id}: <reason>\` in the final message.`,
-    `7. If all tracked tasks are complete, say \`${config.completionPhrase}\` in the final message.`,
+    `3. Update ${config.decisionFile} if you make or revise a consequential implementation decision.`,
+    "4. Do not edit the orchestrator progress/state files directly; the orchestrator records runtime progress for you.",
+    "5. Run the most relevant tests or validation commands for the files you changed when feasible.",
+    `6. If the task is fully complete, say \`TASK_DONE ${task.id}\` in the final message.`,
+    `7. If the task is blocked, say \`TASK_BLOCKED ${task.id}: <reason>\` in the final message.`,
+    `8. If all tracked tasks are complete, say \`${config.completionPhrase}\` in the final message.`,
   ].join("\n");
 }
 

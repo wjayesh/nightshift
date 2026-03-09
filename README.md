@@ -12,6 +12,22 @@ This repo also contains the extracted standalone orchestrator core in `src/orche
 
 These files are part of the product surface. They preserve operational memory inside the repo and make autonomous runs auditable without a database or external service.
 
+### Decision Log
+
+The standalone workflow also supports a repo-owned decision log via `decision_file` in workflow front matter. The default shape is `docs/decisions.md`: a durable markdown record for consequential implementation choices that should outlive a single agent run.
+
+Each decision entry should stay easy to scan in plain git history:
+
+```md
+## YYYY-MM-DD - TASK-ID - Short decision title
+
+- Context: What forced the choice?
+- Decision: What was chosen and why?
+- Impact: What should later readers expect because of it?
+```
+
+That keeps the repo’s reasoning alongside its code and task docs, instead of burying important tradeoffs inside transient terminal output.
+
 ## Quick Start
 
 ### Prerequisites

@@ -20,6 +20,7 @@ dependency_sources:
   - docs/b.md
 instruction_files:
   - CLAUDE.md
+decision_file: docs/records/decisions.md
 workspace_mode: shared
 auto_commit_on_done: true
 auto_push_every_commits: 5
@@ -32,6 +33,7 @@ required_branch: autonomous/server-integration
     expect(workflow.taskSources).toEqual(["docs/a.md"]);
     expect(workflow.dependencySources).toEqual(["docs/b.md"]);
     expect(workflow.instructionFiles).toEqual(["CLAUDE.md"]);
+    expect(workflow.decisionFile).toBe("docs/records/decisions.md");
     expect(workflow.workspaceMode).toBe("shared");
     expect(workflow.autoCommitOnDone).toBe(true);
     expect(workflow.autoPushEveryCommits).toBe(5);
@@ -48,6 +50,7 @@ required_branch: autonomous/server-integration
     expect(workflow.taskSources).toEqual(["docs/tasks.md"]);
     expect(workflow.dependencySources).toEqual([]);
     expect(workflow.instructionFiles).toEqual([]);
+    expect(workflow.decisionFile).toBe("docs/decisions.md");
     expect(workflow.progressFile).toBe(".orchestrator/progress.md");
     expect(workflow.stateFile).toBe(".orchestrator/state.json");
     expect(workflow.workspaceRoot).toBe(".orchestrator/workspaces");
@@ -59,6 +62,7 @@ required_branch: autonomous/server-integration
 task_sources: docs/tasks.md
 dependency_sources: docs/dependencies.md
 instruction_files: docs/instructions.md
+decision_file: docs/records/decisions.md
 agent_args: --json
 state_file: runtime/state.json
 ---
@@ -68,6 +72,7 @@ state_file: runtime/state.json
     expect(workflow.taskSources).toEqual(["docs/tasks.md"]);
     expect(workflow.dependencySources).toEqual(["docs/dependencies.md"]);
     expect(workflow.instructionFiles).toEqual(["docs/instructions.md"]);
+    expect(workflow.decisionFile).toEqual("docs/records/decisions.md");
     expect(workflow.agentArgs).toEqual(["--json"]);
     expect(getRuntimeRoot("/repo", workflow)).toBe(join("/repo", "runtime"));
   });
@@ -146,6 +151,11 @@ describe("task parsing and selection", () => {
     const prompt = buildTaskPrompt(workflow, task, "/repo");
 
     expect(prompt).toContain("Instruction files to read first:\n- None");
+    expect(prompt).toContain("Decision doc:\n- Path: docs/decisions.md");
+    expect(prompt).toContain("## YYYY-MM-DD - ORCH-010 - Short decision title");
+    expect(prompt).toContain(
+      "Update docs/decisions.md if you make or revise a consequential implementation decision.",
+    );
     expect(prompt).toContain("Task ID: ORCH-010");
   });
 });

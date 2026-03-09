@@ -116,18 +116,22 @@ Preserve the current durable runtime artifacts as first-class features.
 ### 1.4 Add decision doc support
 
 - **ID**: `ORCH-013`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-010
+- **Notes**:
+  - 2026-03-10: Wiring a workflow-level decision doc path into the standalone prompt surface, adding a durable markdown decision log template, and documenting the decision log behavior in the README.
+  - 2026-03-10: Added `decision_file` workflow parsing/defaults, pointed `WORKFLOW.orchestrator.md` at `docs/decisions.md`, seeded a readable decision log template with an initial ORCH-013 entry, and updated the task prompt to explicitly require decision doc updates for consequential choices.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts tests/unit/orchestrator.test.ts README.md WORKFLOW.orchestrator.md docs/decisions.md docs/tasks-standalone-orchestrator.md`.
 
 Add first-class decision logging so agents can record key implementation choices durably.
 
 **Acceptance Criteria**
 
-- [ ] Workflow can declare a decision doc location
-- [ ] Agent instructions mention updating the decision doc
-- [ ] Decision entries are easy to read later
-- [ ] README explains the purpose of the decision doc
+- [x] Workflow can declare a decision doc location
+- [x] Agent instructions mention updating the decision doc
+- [x] Decision entries are easy to read later
+- [x] README explains the purpose of the decision doc
 
 ### 1.5 Preserve dependency-aware scheduling
 

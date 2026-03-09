@@ -5,6 +5,7 @@ task_sources:
 instruction_files:
   - docs/standalone-orchestrator-prd.md
   - docs/autonomous-orchestrator.md
+decision_file: docs/decisions.md
 progress_file: .orchestrator/orchestrator-progress.md
 state_file: .orchestrator/orchestrator-state.json
 workspace_root: .orchestrator/orchestrator-workspaces
@@ -36,6 +37,7 @@ The standalone repo should explicitly preserve durable runtime artifacts, depend
 - Reuse the current orchestrator code where it already fits the standalone goal.
 - Prefer repo-native files and conventions over external services or large frameworks.
 - Treat decision docs, progress/state artifacts, review cadence, and commit/push cadence as first-class product behaviors.
+- Update the configured decision doc when you make or revise a consequential implementation choice.
 - Update the task status in `docs/tasks-standalone-orchestrator.md` as the task moves forward.
 - Add concise progress notes to the task list section when useful.
 - Run the most relevant validation commands for the files you changed.
