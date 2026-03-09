@@ -47,3 +47,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The standalone loop already had a short-lived `repo.lock` for integration, but it could still start duplicate workers for the same workflow in one repo clone, and the lock location needed to follow workflow runtime configuration instead of repo-specific names.
 - Decision: Add a lifetime worker lock under the configured runtime root, derive its filename from the workflow file path, fail fast when that lock is already owned by a live process, and only reclaim stale lock directories when the recorded PID is dead or the lock has aged out without valid owner metadata.
 - Impact: Duplicate same-workflow starts now stop immediately with a clear operator message, multiple workflows can coexist when they use distinct runtime artifacts, and stale worker locks can be cleaned up safely without changing the short-lived integration `repo.lock`.
+
+## 2026-03-10 - ORCH-041 - Guard only git-worktree cherry-pick targets
+
+- Context: Task and review worktrees cherry-pick back into one shared integration checkout, so unrelated local edits there can break integration or produce misleading mixed results, while shared-workspace mode commits directly in place and treats local dirt as part of the working set.
+- Decision: Before any git-worktree cherry-pick into the shared integration checkout, inspect `git status --porcelain` and fail fast with a concise dirty-path summary, but leave shared-workspace direct commits unchanged.
+- Impact: Operators now get a clear cleanup action when the integration checkout is dirty, and shared mode keeps its current direct-commit behavior instead of being blocked by a guard designed for worktree reconciliation.

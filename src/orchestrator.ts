@@ -1078,6 +1078,50 @@ export function listUniqueCommits(repoPath: string, baseRef: string): string[] {
     .filter((commit) => unapplied.has(commit));
 }
 
+function listDirtyCheckoutEntries(repoPath: string): string[] {
+  const statusResult = runGit(["status", "--porcelain"], repoPath);
+  if (statusResult.status !== 0) {
+    throw new Error(
+      `Failed to inspect integration checkout status: ${gitError(statusResult, "git status failed")}`,
+    );
+  }
+
+  return statusResult.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      const status = line.slice(0, 2).trim() || line.slice(0, 2);
+      const path = line.slice(3).trim();
+      return `${status} ${path}`.trim();
+    });
+}
+
+function summarizeDirtyCheckout(entries: string[], maxEntries = 5): string {
+  const visibleEntries = entries.slice(0, maxEntries);
+  const hiddenCount = entries.length - visibleEntries.length;
+  if (hiddenCount <= 0) {
+    return visibleEntries.join(", ");
+  }
+
+  return `${visibleEntries.join(", ")}, and ${hiddenCount} more`;
+}
+
+function assertCleanIntegrationCheckout(
+  repoRoot: string,
+  integrationBranch: string,
+  subject: string,
+) {
+  const dirtyEntries = listDirtyCheckoutEntries(repoRoot);
+  if (dirtyEntries.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `${subject} cannot cherry-pick into ${integrationBranch} because the shared integration checkout has uncommitted changes: ${summarizeDirtyCheckout(dirtyEntries)}. Clean or commit those paths and rerun.`,
+  );
+}
+
 export function commitPendingChanges(
   repoPath: string,
   message: string,
@@ -1792,6 +1836,10 @@ function integrateReviewPass(params: {
       };
     }
 
+    if (workspace.kind === "git_worktree") {
+      assertCleanIntegrationCheckout(repoRoot, integrationBranch, reviewId);
+    }
+
     const cherryPickResult = cherryPickCommits(repoRoot, uniqueCommits);
     if (cherryPickResult.error) {
       throw new Error(
@@ -2149,6 +2197,10 @@ function integrateTerminalTask(params: {
         historyNote: `${task.id} already reflected on ${integrationBranch}; no new commits to integrate.`,
         refreshedActionableTasks: rootActionableTasks,
       };
+    }
+
+    if (workspace.kind === "git_worktree") {
+      assertCleanIntegrationCheckout(repoRoot, integrationBranch, task.id);
     }
 
     const cherryPickResult = cherryPickCommits(repoRoot, uniqueCommits);

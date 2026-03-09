@@ -310,18 +310,22 @@ Prevent duplicate standalone workers for the same workflow in the same repo clon
 ### 4.2 Guard dirty integration checkouts
 
 - **ID**: `ORCH-041`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-010
+- **Notes**:
+  - 2026-03-10: Added a git-worktree-only dirty checkout guard before cherry-pick for both terminal-task and review integrations, and shaped the operator-facing error around the dirty paths reported by `git status --porcelain`.
+  - 2026-03-10: Added focused coverage in `tests/unit/orchestrator-git-integration.test.ts` for dirty git-worktree integration failure and shared-workspace direct-commit behavior.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts tests/unit/orchestrator-review-loop.test.ts tests/unit/orchestrator-git-integration.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts tests/unit/orchestrator-git-integration.test.ts docs/decisions.md docs/tasks-standalone-orchestrator.md`.
 
 Refuse git-worktree integration when the shared integration checkout has uncommitted changes.
 
 **Acceptance Criteria**
 
-- [ ] Git-worktree integration checks the shared checkout for pending changes before cherry-pick
-- [ ] Failure messages summarize the dirty paths clearly
-- [ ] Shared-workspace direct-commit mode is not blocked by this guard
-- [ ] Behavior is covered by focused tests
+- [x] Git-worktree integration checks the shared checkout for pending changes before cherry-pick
+- [x] Failure messages summarize the dirty paths clearly
+- [x] Shared-workspace direct-commit mode is not blocked by this guard
+- [x] Behavior is covered by focused tests
 
 ### 4.3 Add non-fatal retries and backoff
 
