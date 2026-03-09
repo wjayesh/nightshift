@@ -29,3 +29,15 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The root README needed to become the standalone orchestrator setup and adoption guide, but this repo still hosts Mahilo-specific workflows such as the existing root `WORKFLOW.md`, so pretending the extraction workspace already matches the final copied-repo layout would make the instructions inaccurate.
 - Decision: Rewrite the README around the standalone workflow that exists today in this repo (`WORKFLOW.orchestrator.md`, `docs/tasks-standalone-orchestrator.md`, and workflow-specific runtime artifact filenames) while explicitly calling out the cleaner target layout for copied repos (`WORKFLOW.md`, `docs/tasks.md`, `docs/decisions.md`, and `.orchestrator/`).
 - Impact: The guide stays truthful for this extraction workspace and still teaches the stable copy-into-project mental model that future standalone adopters should use.
+
+## 2026-03-10 - ORCH-030 - Run review passes inside the main loop and persist a review log
+
+- Context: The standalone repo needed automated review cadence, but adding a separate scheduler or review service would widen the surface area and make copied-repo adoption heavier than necessary.
+- Decision: Keep reviews inside the existing single-workflow loop, trigger them after every configured batch of completed tasks, run them through the same agent command in either the shared workspace or a dedicated review worktree, and append a markdown review log next to the configured state file before the review commit is integrated.
+- Impact: Review cadence stays configurable through `review_every_tasks`, remediation tasks can be inserted directly into task docs at `P0`, `--once` now runs a due review before returning, and repos get a durable review artifact such as `.orchestrator/reviews.md` or `.orchestrator/orchestrator-reviews.md` without introducing another subsystem.
+
+## 2026-03-10 - ORCH-030 - Review completed-task batches from runtime history
+
+- Context: The standalone loop needed a built-in review pass that could run on a fixed cadence, inspect the right recently completed tasks, and persist outcomes durably without introducing a separate service or database.
+- Decision: Add a `review_every_tasks` workflow field, track reviewed completion batches in the persisted state, build review prompts from the next unreviewed batch of completed tasks plus their saved last messages, and let the review pass create `P0` remediation tasks directly in the task docs.
+- Impact: Standalone workflows now have an explicit review cadence with durable state/progress artifacts and review-generated follow-up work, while older Mahilo-specific workflows can keep review automation disabled by setting `review_every_tasks: 0`.

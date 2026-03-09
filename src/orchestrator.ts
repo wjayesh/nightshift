@@ -38,6 +38,7 @@ export type WorkflowConfig = {
   requiredBranch: string | null;
   terminalCommitBehavior: TerminalCommitBehavior;
   autoPushEveryCommits: number;
+  reviewEveryTasks: number;
   workflowBody: string;
   workflowPath: string;
 };
@@ -62,6 +63,28 @@ export type WorkspaceHandle = {
   branchName: string | null;
 };
 
+export type OrchestratorHistoryStatus =
+  | "started"
+  | "continued"
+  | "completed"
+  | "blocked"
+  | "idle"
+  | "agent_error"
+  | "review_started"
+  | "review_completed"
+  | "review_error";
+
+export type OrchestratorReviewRecord = {
+  id: string;
+  iteration: number;
+  timestamp: string;
+  reviewedTaskIds: string[];
+  remediationTaskIds: string[];
+  lastMessageFile: string;
+  commitSha: string | null;
+  note: string;
+};
+
 export type OrchestratorState = {
   workflowPath: string;
   iteration: number;
@@ -69,17 +92,13 @@ export type OrchestratorState = {
   commitsSincePush: number;
   lastCommittedTaskId: string | null;
   lastCommitSha: string | null;
+  lastReviewedCompletionCount: number;
+  reviews: OrchestratorReviewRecord[];
   history: Array<{
     iteration: number;
     taskId: string | null;
     timestamp: string;
-    status:
-      | "started"
-      | "continued"
-      | "completed"
-      | "blocked"
-      | "idle"
-      | "agent_error";
+    status: OrchestratorHistoryStatus;
     note: string;
   }>;
 };
@@ -127,6 +146,7 @@ const DEFAULT_WORKFLOW: Omit<WorkflowConfig, "workflowBody" | "workflowPath"> =
     requiredBranch: null,
     terminalCommitBehavior: "per_task",
     autoPushEveryCommits: 3,
+    reviewEveryTasks: 3,
   };
 
 const STATUS_VALUES = new Set<TaskStatus>([
@@ -185,6 +205,23 @@ function parseTerminalCommitBehavior(
 
   throw new Error(
     `Unsupported terminal_commit_behavior in ${workflowPath}: ${String(value)}. Use "per_task".`,
+  );
+}
+
+function parseReviewEveryTasks(
+  value: FrontMatterValue | undefined,
+  workflowPath: string,
+): number {
+  if (value === undefined) {
+    return DEFAULT_WORKFLOW.reviewEveryTasks;
+  }
+
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  throw new Error(
+    `Unsupported review_every_tasks in ${workflowPath}: ${String(value)}. Use a non-negative integer.`,
   );
 }
 
@@ -325,6 +362,10 @@ export function parseWorkflowFile(
       typeof frontMatter.auto_push_every_commits === "number"
         ? frontMatter.auto_push_every_commits
         : DEFAULT_WORKFLOW.autoPushEveryCommits,
+    reviewEveryTasks: parseReviewEveryTasks(
+      frontMatter.review_every_tasks,
+      workflowPath,
+    ),
     workflowBody,
     workflowPath,
   };
@@ -533,6 +574,31 @@ export function ensureDirectory(path: string) {
   mkdirSync(path, { recursive: true });
 }
 
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+
+  for (const value of values) {
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    unique.push(value);
+  }
+
+  return unique;
+}
+
+function getCompletedTaskIdsFromHistory(
+  history: OrchestratorState["history"],
+): string[] {
+  return dedupeStrings(
+    history
+      .filter((entry) => entry.status === "completed" && entry.taskId)
+      .map((entry) => entry.taskId ?? ""),
+  );
+}
+
 export function loadState(
   repoRoot: string,
   config: WorkflowConfig,
@@ -547,6 +613,8 @@ export function loadState(
       commitsSincePush: 0,
       lastCommittedTaskId: null,
       lastCommitSha: null,
+      lastReviewedCompletionCount: 0,
+      reviews: [],
       history: [],
     };
     writeFileSync(statePath, JSON.stringify(initialState, null, 2) + "\n");
@@ -555,7 +623,16 @@ export function loadState(
 
   const state = JSON.parse(
     readFileSync(statePath, "utf8"),
-  ) as OrchestratorState;
+  ) as Partial<OrchestratorState>;
+  const history = Array.isArray(state.history) ? state.history : [];
+  const completedTaskIds = getCompletedTaskIdsFromHistory(history);
+  const lastReviewedCompletionCount =
+    typeof state.lastReviewedCompletionCount === "number" &&
+    Number.isInteger(state.lastReviewedCompletionCount) &&
+    state.lastReviewedCompletionCount >= 0
+      ? Math.min(state.lastReviewedCompletionCount, completedTaskIds.length)
+      : 0;
+
   return {
     workflowPath: state.workflowPath ?? config.workflowPath,
     iteration: state.iteration ?? 0,
@@ -563,7 +640,9 @@ export function loadState(
     commitsSincePush: state.commitsSincePush ?? 0,
     lastCommittedTaskId: state.lastCommittedTaskId ?? null,
     lastCommitSha: state.lastCommitSha ?? null,
-    history: Array.isArray(state.history) ? state.history : [],
+    lastReviewedCompletionCount,
+    reviews: Array.isArray(state.reviews) ? state.reviews : [],
+    history,
   };
 }
 
@@ -709,9 +788,215 @@ export function buildTaskPrompt(
   ].join("\n");
 }
 
+type ReviewTaskContext = {
+  task: Task;
+  completedAt: string;
+  historyNote: string;
+  lastMessage: string;
+};
+
+function truncatePromptBlock(value: string, maxLength = 2000) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength)}\n...[truncated]`;
+}
+
+function listCompletedTaskIds(
+  state: Pick<OrchestratorState, "history">,
+): string[] {
+  return getCompletedTaskIdsFromHistory(state.history);
+}
+
+function getPendingReviewTaskIds(
+  workflow: Pick<WorkflowConfig, "reviewEveryTasks">,
+  state: Pick<OrchestratorState, "history" | "lastReviewedCompletionCount">,
+): string[] {
+  if (workflow.reviewEveryTasks <= 0) {
+    return [];
+  }
+
+  const completedTaskIds = listCompletedTaskIds(state);
+  const reviewStart = Math.min(
+    state.lastReviewedCompletionCount,
+    completedTaskIds.length,
+  );
+  return completedTaskIds.slice(
+    reviewStart,
+    reviewStart + workflow.reviewEveryTasks,
+  );
+}
+
+function shouldRunReview(
+  workflow: Pick<WorkflowConfig, "reviewEveryTasks">,
+  state: Pick<
+    OrchestratorState,
+    "activeTaskId" | "history" | "lastReviewedCompletionCount"
+  >,
+  actionableTasks: Task[],
+) {
+  if (workflow.reviewEveryTasks <= 0 || state.activeTaskId) {
+    return false;
+  }
+
+  if (actionableTasks.some((task) => task.status === "in-progress")) {
+    return false;
+  }
+
+  return (
+    getPendingReviewTaskIds(workflow, state).length ===
+    workflow.reviewEveryTasks
+  );
+}
+
+function getReviewTaskContexts(
+  repoRoot: string,
+  config: WorkflowConfig,
+  actionableTasks: Task[],
+  state: OrchestratorState,
+): ReviewTaskContext[] {
+  const actionableById = new Map(
+    actionableTasks.map((task) => [task.id, task]),
+  );
+  const completionNotes = new Map<
+    string,
+    { timestamp: string; note: string }
+  >();
+
+  for (let index = state.history.length - 1; index >= 0; index -= 1) {
+    const entry = state.history[index];
+    if (
+      entry.status !== "completed" ||
+      !entry.taskId ||
+      completionNotes.has(entry.taskId)
+    ) {
+      continue;
+    }
+
+    completionNotes.set(entry.taskId, {
+      timestamp: entry.timestamp,
+      note: entry.note,
+    });
+  }
+
+  return getPendingReviewTaskIds(config, state).map((taskId) => {
+    const task = actionableById.get(taskId);
+    if (!task) {
+      throw new Error(
+        `Scheduled review task ${taskId} is no longer present in the configured task sources.`,
+      );
+    }
+
+    const completion = completionNotes.get(taskId);
+    const lastMessagePath = getLastMessagePath(repoRoot, config, taskId);
+    return {
+      task,
+      completedAt: completion?.timestamp ?? "",
+      historyNote: completion?.note ?? `${taskId} completed.`,
+      lastMessage: existsSync(lastMessagePath)
+        ? readFileSync(lastMessagePath, "utf8").trim()
+        : "",
+    };
+  });
+}
+
+function createReviewTask(
+  reviewId: string,
+  workflow: WorkflowConfig,
+  reviewedTasks: ReviewTaskContext[],
+): Task {
+  return {
+    id: reviewId,
+    title: `Review ${reviewedTasks.length} completed task${reviewedTasks.length === 1 ? "" : "s"}`,
+    status: "in-progress",
+    priority: "P0",
+    dependsOn: [],
+    filePath: workflow.taskSources[0] ?? workflow.workflowPath,
+    heading: `Review ${reviewId}`,
+    headingLevel: 2,
+    sectionBody: reviewedTasks
+      .map((entry) => `- ${entry.task.id}: ${entry.task.title}`)
+      .join("\n"),
+    order: -1,
+    sortIndex: Number.MAX_SAFE_INTEGER,
+  };
+}
+
+function buildReviewPrompt(
+  config: WorkflowConfig,
+  reviewId: string,
+  reviewedTasks: ReviewTaskContext[],
+  workspacePath: string,
+): string {
+  const instructionList =
+    config.instructionFiles.length > 0
+      ? config.instructionFiles.map((file) => `- ${file}`).join("\n")
+      : "- None";
+  const workspaceNote =
+    workspacePath === process.cwd() ? "shared repo workspace" : workspacePath;
+  const reviewSections = reviewedTasks
+    .map((entry, index) => {
+      const sectionLines = [
+        `### ${index + 1}. ${entry.task.id} ${entry.task.title}`,
+        `- Completed at: ${entry.completedAt || "unknown"}`,
+        `- Task file: ${entry.task.filePath}`,
+        `- Completion note: ${entry.historyNote}`,
+        "- Current task section:",
+        "```md",
+        `### ${entry.task.heading}`,
+        entry.task.sectionBody,
+        "```",
+      ];
+
+      if (entry.lastMessage) {
+        sectionLines.push(
+          "- Last agent message:",
+          "```text",
+          truncatePromptBlock(entry.lastMessage),
+          "```",
+        );
+      } else {
+        sectionLines.push("- Last agent message: (not captured)");
+      }
+
+      return sectionLines.join("\n");
+    })
+    .join("\n\n");
+
+  return [
+    `Workflow: ${config.name}`,
+    `Review ID: ${reviewId}`,
+    `Review Cadence: every ${config.reviewEveryTasks} completed task${config.reviewEveryTasks === 1 ? "" : "s"}`,
+    `Workspace: ${workspaceNote}`,
+    "",
+    config.workflowBody,
+    "",
+    "Instruction files to read first:",
+    instructionList,
+    "",
+    "Decision doc:",
+    `- Path: ${config.decisionFile}`,
+    "- Update it if the review leads you to a consequential repo or workflow decision.",
+    "",
+    "Review scope:",
+    reviewSections,
+    "",
+    "Execution rules:",
+    `1. Review the ${reviewedTasks.length} completed task${reviewedTasks.length === 1 ? "" : "s"} listed above together before changing anything.`,
+    "2. Inspect the current repo state, task docs, and relevant validations as needed to confirm the finished work still matches its acceptance criteria.",
+    "3. If you find missed acceptance criteria, regressions, or follow-up work that must happen soon, add remediation task entries directly to the relevant task doc.",
+    "4. Any remediation task you create must start as `pending` and use `Priority: P0`.",
+    "5. Follow the existing task-doc format (`ID`, `Status`, `Priority`, `Depends on`) so the scheduler can pick the new work up.",
+    "6. Do not edit the orchestrator runtime progress/state files directly; the orchestrator records the review outcome for you.",
+    "7. Start your final message with `REVIEW_DONE:` and list any remediation task IDs you created.",
+  ].join("\n");
+}
+
 export type AgentRunResult = {
   exitCode: number;
   lastMessage: string;
+  lastMessagePath: string;
   commandLine: string;
 };
 
@@ -732,6 +1017,17 @@ export type CherryPickResult = {
   lastCommitSha: string | null;
   error: string | null;
 };
+
+function getLastMessagePath(
+  repoRoot: string,
+  config: WorkflowConfig,
+  identifier: string,
+) {
+  return join(
+    getRuntimeRoot(repoRoot, config),
+    `${sanitizePathSegment(identifier)}-last-message.txt`,
+  );
+}
 
 export function getHeadCommit(repoPath: string): string | null {
   const result = runGit(["rev-parse", "--short", "HEAD"], repoPath);
@@ -870,19 +1166,16 @@ export function pushBranch(repoRoot: string, branch: string): RepoPushResult {
   return { pushed: true, error: null };
 }
 
-export function runAgentForTask(
+function runAgentCommand(
   repoRoot: string,
   config: WorkflowConfig,
-  task: Task,
   workspacePath: string,
+  identifier: string,
   prompt: string,
+  extraEnv: Record<string, string>,
 ): AgentRunResult {
-  const runtimeRoot = getRuntimeRoot(repoRoot, config);
-  ensureDirectory(runtimeRoot);
-  const lastMessagePath = join(
-    runtimeRoot,
-    `${sanitizePathSegment(task.id)}-last-message.txt`,
-  );
+  const lastMessagePath = getLastMessagePath(repoRoot, config, identifier);
+  ensureDirectory(dirname(lastMessagePath));
   const args = [
     ...config.agentArgs,
     "-C",
@@ -899,19 +1192,119 @@ export function runAgentForTask(
     encoding: "utf8",
     env: {
       ...process.env,
-      ORCHESTRATOR_TASK_ID: task.id,
-      ORCHESTRATOR_TASK_FILE: task.filePath,
       ORCHESTRATOR_WORKFLOW: config.name,
+      ...extraEnv,
     },
   });
 
   return {
     exitCode: child.status ?? 1,
+    lastMessagePath,
     lastMessage: existsSync(lastMessagePath)
       ? readFileSync(lastMessagePath, "utf8")
       : "",
     commandLine: [config.agentCommand, ...args].join(" "),
   };
+}
+
+export function runAgentForTask(
+  repoRoot: string,
+  config: WorkflowConfig,
+  task: Task,
+  workspacePath: string,
+  prompt: string,
+): AgentRunResult {
+  return runAgentCommand(repoRoot, config, workspacePath, task.id, prompt, {
+    ORCHESTRATOR_RUN_KIND: "task",
+    ORCHESTRATOR_TASK_ID: task.id,
+    ORCHESTRATOR_TASK_FILE: task.filePath,
+  });
+}
+
+function getReviewLogPath(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+): string {
+  const statePath = resolvePath(repoRoot, config.stateFile);
+  const stateFileName = statePath.split(/[\\/]/).pop() ?? "state.json";
+  const reviewFileName = stateFileName.endsWith("state.json")
+    ? stateFileName.replace(/state\.json$/, "reviews.md")
+    : `${stateFileName}.reviews.md`;
+  return join(dirname(statePath), reviewFileName);
+}
+
+function summarizeMessage(message: string, fallback: string): string {
+  const firstLine = message
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return (firstLine ?? fallback).replace(/\s+/g, " ").trim();
+}
+
+function appendReviewOutcome(params: {
+  repoPath: string;
+  displayRoot: string;
+  workflow: WorkflowConfig;
+  reviewId: string;
+  reviewedAt: string;
+  reviewTasks: ReviewTaskContext[];
+  remediationTasks: Task[];
+  summary: string;
+  lastMessagePath: string;
+}) {
+  const {
+    repoPath,
+    displayRoot,
+    workflow,
+    reviewId,
+    reviewedAt,
+    reviewTasks,
+    remediationTasks,
+    summary,
+    lastMessagePath,
+  } = params;
+  const reviewLogPath = getReviewLogPath(repoPath, workflow);
+  const existing = existsSync(reviewLogPath)
+    ? readFileSync(reviewLogPath, "utf8")
+    : `# ${workflow.name} Reviews\n\n`;
+  const reviewedTaskSummary = reviewTasks
+    .map(({ task }) => `${task.id} (${task.title})`)
+    .join(", ");
+  const remediationTaskSummary =
+    remediationTasks.length > 0
+      ? remediationTasks
+          .map((task) => `${task.id} (${task.filePath})`)
+          .join(", ")
+      : "None";
+
+  ensureDirectory(dirname(reviewLogPath));
+  writeFileSync(
+    reviewLogPath,
+    existing +
+      [
+        `## ${reviewId} - ${reviewedAt}`,
+        `- Reviewed tasks: ${reviewedTaskSummary}`,
+        `- Remediation tasks: ${remediationTaskSummary}`,
+        `- Summary: ${summary}`,
+        `- Last message file: ${relative(displayRoot, lastMessagePath) || lastMessagePath}`,
+        "",
+      ].join("\n"),
+  );
+}
+
+function runAgentForReview(
+  repoRoot: string,
+  config: WorkflowConfig,
+  reviewId: string,
+  workspacePath: string,
+  prompt: string,
+  reviewedTaskIds: string[],
+): AgentRunResult {
+  return runAgentCommand(repoRoot, config, workspacePath, reviewId, prompt, {
+    ORCHESTRATOR_RUN_KIND: "review",
+    ORCHESTRATOR_REVIEW_ID: reviewId,
+    ORCHESTRATOR_REVIEW_TASK_IDS: reviewedTaskIds.join(","),
+  });
 }
 
 export function formatHistoryNote(
@@ -1159,6 +1552,371 @@ function isAutoPushEnabled(
   return workflow.autoPushEveryCommits > 0;
 }
 
+function findReviewRemediationTasks(beforeTasks: Task[], afterTasks: Task[]) {
+  const existingTaskIds = new Set(beforeTasks.map((task) => task.id));
+  return afterTasks.filter((task) => !existingTaskIds.has(task.id));
+}
+
+function validateReviewRemediationTasks(
+  reviewId: string,
+  remediationTasks: Task[],
+) {
+  for (const task of remediationTasks) {
+    if (task.status !== "pending") {
+      throw new Error(
+        `${reviewId} created remediation task ${task.id} with status ${task.status}. Review-created tasks must start as pending.`,
+      );
+    }
+
+    if (task.priority !== "P0") {
+      throw new Error(
+        `${reviewId} created remediation task ${task.id} with priority ${task.priority}. Review-created tasks must use Priority P0.`,
+      );
+    }
+  }
+}
+
+function integrateReviewPass(params: {
+  repoRoot: string;
+  workflow: WorkflowConfig;
+  reviewId: string;
+  reviewedTaskIds: string[];
+  workspace: WorkspaceHandle;
+  state: OrchestratorState;
+}): {
+  historyNote: string;
+  refreshedActionableTasks: Task[];
+  commitSha: string | null;
+} {
+  const { repoRoot, workflow, reviewId, reviewedTaskIds, workspace, state } =
+    params;
+  const integrationBranch =
+    workflow.requiredBranch ?? getCurrentBranch(repoRoot);
+  if (!integrationBranch) {
+    throw new Error(
+      "Could not determine the integration branch for review integration.",
+    );
+  }
+
+  const reviewSummary = `Reviewed ${reviewedTaskIds.join(", ")}`;
+  const commitResult = commitPendingChanges(
+    workspace.path,
+    `orchestrator: review ${reviewId} ${reviewSummary}`,
+  );
+  if (commitResult.error) {
+    throw new Error(
+      `${reviewId} auto-commit failed in review workspace: ${commitResult.error}`,
+    );
+  }
+
+  if (
+    workspace.kind === "shared" &&
+    getCurrentBranch(workspace.path) === integrationBranch
+  ) {
+    const refreshedActionableTasks = loadTasks(repoRoot, workflow.taskSources);
+    let historyNote = commitResult.committed
+      ? `${reviewId} reviewed ${reviewedTaskIds.length} task${
+          reviewedTaskIds.length === 1 ? "" : "s"
+        } and committed directly on ${integrationBranch}${
+          commitResult.commitSha ? ` as ${commitResult.commitSha}` : ""
+        }.`
+      : `${reviewId} reviewed ${reviewedTaskIds.length} task${
+          reviewedTaskIds.length === 1 ? "" : "s"
+        }; no repo changes were needed.`;
+
+    if (commitResult.committed) {
+      state.commitsSincePush += 1;
+      state.lastCommittedTaskId = reviewId;
+      state.lastCommitSha = commitResult.commitSha;
+    }
+
+    const shouldPush =
+      isAutoPushEnabled(workflow) &&
+      state.commitsSincePush > 0 &&
+      (state.commitsSincePush >= workflow.autoPushEveryCommits ||
+        areAllTasksComplete(refreshedActionableTasks));
+
+    if (shouldPush) {
+      const pushResult = maybePushBranch(
+        repoRoot,
+        integrationBranch,
+        state.commitsSincePush,
+        true,
+      );
+      if (pushResult.error) {
+        throw new Error(`${historyNote} Auto-push failed: ${pushResult.error}`);
+      }
+      state.commitsSincePush = 0;
+      historyNote = `${historyNote} Pushed ${integrationBranch}.`;
+    }
+
+    return {
+      historyNote,
+      refreshedActionableTasks,
+      commitSha: commitResult.commitSha,
+    };
+  }
+
+  const lockPath = acquireRepoLock(repoRoot, workflow, reviewId);
+  try {
+    const uniqueCommits = listUniqueCommits(workspace.path, integrationBranch);
+    if (uniqueCommits.length === 0) {
+      return {
+        historyNote: `${reviewId} reviewed ${reviewedTaskIds.length} task${
+          reviewedTaskIds.length === 1 ? "" : "s"
+        }; no new commits were needed on ${integrationBranch}.`,
+        refreshedActionableTasks: loadTasks(repoRoot, workflow.taskSources),
+        commitSha: null,
+      };
+    }
+
+    const cherryPickResult = cherryPickCommits(repoRoot, uniqueCommits);
+    if (cherryPickResult.error) {
+      throw new Error(
+        `${reviewId} integration failed: ${cherryPickResult.error}`,
+      );
+    }
+
+    state.commitsSincePush += cherryPickResult.commitCount;
+    state.lastCommittedTaskId = reviewId;
+    state.lastCommitSha = cherryPickResult.lastCommitSha;
+
+    const refreshedActionableTasks = loadTasks(repoRoot, workflow.taskSources);
+    let historyNote = `${reviewId} reviewed ${reviewedTaskIds.length} task${
+      reviewedTaskIds.length === 1 ? "" : "s"
+    } and integrated ${cherryPickResult.commitCount} commit${
+      cherryPickResult.commitCount === 1 ? "" : "s"
+    }${cherryPickResult.lastCommitSha ? ` as ${cherryPickResult.lastCommitSha}` : ""}.`;
+
+    const shouldPush =
+      isAutoPushEnabled(workflow) &&
+      (state.commitsSincePush >= workflow.autoPushEveryCommits ||
+        areAllTasksComplete(refreshedActionableTasks));
+
+    if (shouldPush) {
+      const pushResult = maybePushBranch(
+        repoRoot,
+        integrationBranch,
+        state.commitsSincePush,
+        true,
+      );
+      if (pushResult.error) {
+        throw new Error(`${historyNote} Auto-push failed: ${pushResult.error}`);
+      }
+      state.commitsSincePush = 0;
+      historyNote = `${historyNote} Pushed ${integrationBranch}.`;
+    }
+
+    return {
+      historyNote,
+      refreshedActionableTasks,
+      commitSha: cherryPickResult.lastCommitSha,
+    };
+  } finally {
+    releaseRepoLock(lockPath);
+  }
+}
+
+function executeReviewPass(params: {
+  repoRoot: string;
+  workflow: WorkflowConfig;
+  actionableTasks: Task[];
+  state: OrchestratorState;
+  dryRun: boolean;
+  log: (message: string) => void;
+}): {
+  refreshedActionableTasks: Task[];
+  stopAfterIteration: boolean;
+  errorMessage: string | null;
+} {
+  const { repoRoot, workflow, actionableTasks, state, dryRun, log } = params;
+  const reviewedTasks = getReviewTaskContexts(
+    repoRoot,
+    workflow,
+    actionableTasks,
+    state,
+  );
+  if (reviewedTasks.length === 0) {
+    return {
+      refreshedActionableTasks: actionableTasks,
+      stopAfterIteration: false,
+      errorMessage: null,
+    };
+  }
+
+  const reviewId = `review-${String(state.reviews.length + 1).padStart(3, "0")}`;
+  const reviewTask = createReviewTask(reviewId, workflow, reviewedTasks);
+  const workspacePreview = previewWorkspacePath(repoRoot, workflow, reviewTask);
+  const prompt = buildReviewPrompt(
+    workflow,
+    reviewId,
+    reviewedTasks,
+    workspacePreview,
+  );
+
+  log(
+    `\n=== Iteration ${state.iteration + (dryRun ? 0 : 1)}: ${reviewId} periodic review ===`,
+  );
+  log(`Workspace: ${workspacePreview}`);
+
+  if (dryRun) {
+    log("Dry run selected review summary:");
+    log(`- Review: ${reviewId}`);
+    log(
+      `- Reviewed tasks: ${reviewedTasks.map((entry) => entry.task.id).join(", ")}`,
+    );
+    log(
+      `- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`,
+    );
+    return {
+      refreshedActionableTasks: actionableTasks,
+      stopAfterIteration: false,
+      errorMessage: null,
+    };
+  }
+
+  state.iteration += 1;
+  const reviewStartNote = `Reviewing ${reviewedTasks
+    .map((entry) => entry.task.id)
+    .join(", ")} in ${workspacePreview === repoRoot ? "." : workspacePreview}.`;
+  appendProgress(repoRoot, workflow, [
+    formatHistoryNote(reviewId, "review_started", reviewStartNote),
+  ]);
+  state.history.push({
+    iteration: state.iteration,
+    taskId: reviewId,
+    timestamp: new Date().toISOString(),
+    status: "review_started",
+    note: reviewStartNote,
+  });
+  saveState(repoRoot, workflow, state);
+
+  try {
+    const workspace = ensureWorkspace(repoRoot, workflow, reviewTask);
+    const runResult = runAgentForReview(
+      repoRoot,
+      workflow,
+      reviewId,
+      workspace.path,
+      buildReviewPrompt(workflow, reviewId, reviewedTasks, workspace.path),
+      reviewedTasks.map((entry) => entry.task.id),
+    );
+
+    if (runResult.exitCode !== 0) {
+      const historyNote = `Review command failed: ${runResult.commandLine}`;
+      appendProgress(repoRoot, workflow, [
+        formatHistoryNote(reviewId, "review_error", historyNote),
+      ]);
+      state.history.push({
+        iteration: state.iteration,
+        taskId: reviewId,
+        timestamp: new Date().toISOString(),
+        status: "review_error",
+        note: historyNote,
+      });
+      saveState(repoRoot, workflow, state);
+      return {
+        refreshedActionableTasks: actionableTasks,
+        stopAfterIteration: true,
+        errorMessage: historyNote,
+      };
+    }
+
+    const reviewWorkspaceTasks = loadTasks(
+      workspace.path,
+      workflow.taskSources,
+    );
+    const remediationTasks = findReviewRemediationTasks(
+      actionableTasks,
+      reviewWorkspaceTasks,
+    );
+    validateReviewRemediationTasks(reviewId, remediationTasks);
+    const reviewedAt = new Date().toISOString();
+    const summary = summarizeMessage(
+      runResult.lastMessage,
+      `REVIEW_DONE: Reviewed ${reviewedTasks
+        .map((entry) => entry.task.id)
+        .join(", ")}.`,
+    );
+    appendReviewOutcome({
+      repoPath: workspace.path,
+      displayRoot: repoRoot,
+      workflow,
+      reviewId,
+      reviewedAt,
+      reviewTasks: reviewedTasks,
+      remediationTasks,
+      summary,
+      lastMessagePath: runResult.lastMessagePath,
+    });
+
+    const integrationResult = integrateReviewPass({
+      repoRoot,
+      workflow,
+      reviewId,
+      reviewedTaskIds: reviewedTasks.map((entry) => entry.task.id),
+      workspace,
+      state,
+    });
+
+    state.lastReviewedCompletionCount += reviewedTasks.length;
+
+    const remediationTaskIds = remediationTasks.map((task) => task.id);
+    const remediationNote =
+      remediationTaskIds.length > 0
+        ? `Created remediation tasks: ${remediationTaskIds.join(", ")}.`
+        : "No remediation tasks created.";
+    const historyNote = `${integrationResult.historyNote} ${remediationNote} ${summary}`;
+
+    state.reviews.push({
+      id: reviewId,
+      iteration: state.iteration,
+      timestamp: reviewedAt,
+      reviewedTaskIds: reviewedTasks.map((entry) => entry.task.id),
+      remediationTaskIds,
+      lastMessageFile: relative(repoRoot, runResult.lastMessagePath),
+      commitSha: integrationResult.commitSha,
+      note: historyNote,
+    });
+    appendProgress(repoRoot, workflow, [
+      formatHistoryNote(reviewId, "review_completed", historyNote),
+    ]);
+    state.history.push({
+      iteration: state.iteration,
+      taskId: reviewId,
+      timestamp: new Date().toISOString(),
+      status: "review_completed",
+      note: historyNote,
+    });
+    saveState(repoRoot, workflow, state);
+
+    return {
+      refreshedActionableTasks: integrationResult.refreshedActionableTasks,
+      stopAfterIteration: false,
+      errorMessage: null,
+    };
+  } catch (caughtError) {
+    const historyNote =
+      caughtError instanceof Error ? caughtError.message : String(caughtError);
+    appendProgress(repoRoot, workflow, [
+      formatHistoryNote(reviewId, "review_error", historyNote),
+    ]);
+    state.history.push({
+      iteration: state.iteration,
+      taskId: reviewId,
+      timestamp: new Date().toISOString(),
+      status: "review_error",
+      note: historyNote,
+    });
+    saveState(repoRoot, workflow, state);
+    return {
+      refreshedActionableTasks: actionableTasks,
+      stopAfterIteration: true,
+      errorMessage: historyNote,
+    };
+  }
+}
+
 function integrateTerminalTask(params: {
   repoRoot: string;
   workflow: WorkflowConfig;
@@ -1358,6 +2116,29 @@ export function runOrchestratorLoop(
       repoRoot,
       options.workflowFile,
     );
+
+    if (shouldRunReview(workflow, state, actionable)) {
+      const reviewResult = executeReviewPass({
+        repoRoot,
+        workflow,
+        actionableTasks: actionable,
+        state,
+        dryRun: options.dryRun,
+        log,
+      });
+
+      if (reviewResult.stopAfterIteration) {
+        error(reviewResult.errorMessage ?? "Review pass failed.");
+        return 1;
+      }
+
+      if (options.once || options.dryRun) {
+        return 0;
+      }
+
+      continue;
+    }
+
     const task = selectNextTask(actionable, state.activeTaskId, taskUniverse);
 
     if (!task) {
@@ -1532,10 +2313,25 @@ export function runOrchestratorLoop(
       return 1;
     }
 
-    if (
-      runResult.lastMessage.includes(workflow.completionPhrase) ||
-      areAllTasksComplete(refreshedActionableTasks)
-    ) {
+    if (shouldRunReview(workflow, state, refreshedActionableTasks)) {
+      const reviewResult = executeReviewPass({
+        repoRoot,
+        workflow,
+        actionableTasks: refreshedActionableTasks,
+        state,
+        dryRun: false,
+        log,
+      });
+
+      if (reviewResult.stopAfterIteration) {
+        error(reviewResult.errorMessage ?? "Review pass failed.");
+        return 1;
+      }
+
+      refreshedActionableTasks = reviewResult.refreshedActionableTasks;
+    }
+
+    if (areAllTasksComplete(refreshedActionableTasks)) {
       const integrationBranch =
         workflow.requiredBranch ?? getCurrentBranch(repoRoot);
       if (

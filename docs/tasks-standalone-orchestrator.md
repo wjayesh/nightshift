@@ -216,19 +216,23 @@ Provide small example files that show how a new repo would adopt the orchestrato
 ### 3.1 Build periodic review loop
 
 - **ID**: `ORCH-030`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-020
+- **Notes**:
+  - 2026-03-10: Started implementing configurable periodic review scheduling, durable review outcomes, and review-created remediation task insertion in the standalone loop.
+  - 2026-03-10: Added `review_every_tasks` workflow parsing/defaults, review batching from persisted completion history, synthetic review prompts that inspect the next completed-task batch plus saved last messages, and durable review records in state/progress plus per-review last-message files.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts tests/unit/orchestrator-review-loop.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts tests/unit/orchestrator.test.ts tests/unit/orchestrator-review-loop.test.ts README.md WORKFLOW.orchestrator.md WORKFLOW.md WORKFLOW.plugin.md docs/autonomous-orchestrator.md docs/decisions.md docs/tasks-standalone-orchestrator.md`.
 
 Add a built-in review pass that runs after a configurable number of completed tasks.
 
 **Acceptance Criteria**
 
-- [ ] Review cadence is configurable
-- [ ] Recommended default is documented
-- [ ] Reviewer inspects the last N completed tasks
-- [ ] Reviewer can create new high-priority remediation tasks
-- [ ] Review outcomes are persisted clearly
+- [x] Review cadence is configurable
+- [x] Recommended default is documented
+- [x] Reviewer inspects the last N completed tasks
+- [x] Reviewer can create new high-priority remediation tasks
+- [x] Review outcomes are persisted clearly
 
 ### 3.2 Define review-created task behavior
 

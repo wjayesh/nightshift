@@ -19,6 +19,7 @@ poll_interval_seconds: 3
 completion_phrase: COMPLETE
 required_branch: autonomous/server-integration
 terminal_commit_behavior: per_task
+review_every_tasks: 0
 auto_push_every_commits: 3
 ---
 

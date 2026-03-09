@@ -120,6 +120,7 @@ poll_interval_seconds: 3
 completion_phrase: COMPLETE
 required_branch: autonomous/integration
 terminal_commit_behavior: per_task
+review_every_tasks: 3
 auto_push_every_commits: 3
 ---
 
@@ -153,6 +154,8 @@ Important front matter fields:
   branch.
 - `terminal_commit_behavior`: currently `per_task`; every `done` or `blocked`
   task is committed deliberately before integration.
+- `review_every_tasks`: review cadence. `3` is the recommended default, `0`
+  disables the built-in review pass.
 - `auto_push_every_commits`: push cadence. `3` is the recommended default, `0`
   keeps integration commits local until a human pushes.
 
@@ -202,14 +205,17 @@ The standalone layout uses `.orchestrator/` for:
 - `progress.md`: append-only iteration log with task IDs, statuses, and notes.
 - `state.json`: persisted loop state such as iteration count, active task,
   commit counters, and history.
+- `reviews.md`: append-only review log written next to the configured
+  `state_file`. It records each review batch, remediation task IDs, and the
+  captured last-message path.
 - `repo.lock`: short-lived lock used only around integration-branch mutation.
 - `<task-id>-last-message.txt`: the terminal agent message for each task.
 - `workspaces/`: shared task directories or git worktrees, depending on
   `workspace_mode`.
 
 In this repo, the standalone workflow writes the same artifact types with
-workflow-specific filenames such as `orchestrator-progress.md` and
-`orchestrator-state.json`.
+workflow-specific filenames such as `orchestrator-progress.md`,
+`orchestrator-state.json`, and `orchestrator-reviews.md`.
 
 ## Decision Docs
 
@@ -242,18 +248,22 @@ Review cadence is part of the standalone operating model, not an afterthought.
 The recommended default is to run a review after every 3 completed
 implementation tasks.
 
-The intended behavior is:
+`review_every_tasks` controls both when the review runs and how many recently
+completed tasks the reviewer inspects in that batch.
+
+The built-in behavior is:
 
 - after every 3 completed implementation tasks, run a review pass
 - inspect the last 3 completed tasks together
 - create new high-priority follow-up tasks if acceptance criteria or behavior
   were missed
+- persist the outcome in `.orchestrator/state.json`,
+  `.orchestrator/progress.md`, a review log such as `.orchestrator/reviews.md`,
+  and a per-review last-message file such as
+  `.orchestrator/review-001-last-message.txt`
 
-The current extraction repo documents this cadence in the PRD and workflow
-instructions, but dedicated scheduler automation for it is still a follow-up
-task. If you copy the repo today, keep the review policy explicit in your
-workflow body or instruction docs until a dedicated `review_every_tasks`
-workflow field lands.
+If you do not want automated review passes in a specific workflow, set
+`review_every_tasks: 0`.
 
 ## Commit And Push Cadence
 

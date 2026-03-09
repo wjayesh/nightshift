@@ -24,6 +24,7 @@ decision_file: docs/records/decisions.md
 workspace_mode: shared
 terminal_commit_behavior: per_task
 auto_push_every_commits: 5
+review_every_tasks: 4
 required_branch: autonomous/server-integration
 ---
 # Workflow\nBody here.\n`);
@@ -37,6 +38,7 @@ required_branch: autonomous/server-integration
     expect(workflow.workspaceMode).toBe("shared");
     expect(workflow.terminalCommitBehavior).toBe("per_task");
     expect(workflow.autoPushEveryCommits).toBe(5);
+    expect(workflow.reviewEveryTasks).toBe(4);
     expect(workflow.requiredBranch).toBe("autonomous/server-integration");
     expect(workflow.workflowBody).toContain("Body here");
   });
@@ -56,6 +58,7 @@ required_branch: autonomous/server-integration
     expect(workflow.workspaceRoot).toBe(".orchestrator/workspaces");
     expect(workflow.agentArgs).toEqual(["exec"]);
     expect(workflow.terminalCommitBehavior).toBe("per_task");
+    expect(workflow.reviewEveryTasks).toBe(3);
   });
 
   it("accepts single-path workflow fields without list syntax", () => {
@@ -86,6 +89,16 @@ terminal_commit_behavior: manual
 # Workflow
 `),
     ).toThrow(/terminal_commit_behavior/);
+  });
+
+  it("rejects unsupported review cadence values", () => {
+    expect(() =>
+      parseWorkflowFile(`---
+review_every_tasks: later
+---
+# Workflow
+`),
+    ).toThrow(/review_every_tasks/);
   });
 });
 
