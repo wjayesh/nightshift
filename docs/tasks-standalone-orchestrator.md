@@ -155,18 +155,22 @@ Keep doc-based dependency ordering as a core feature.
 ### 1.6 Preserve git integration cadence
 
 - **ID**: `ORCH-015`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-010
+- **Notes**:
+  - 2026-03-10: Auditing the extracted standalone git integration flow to replace the misleading `auto_commit_on_done` knob with explicit terminal-commit documentation/config, keep push cadence configurable, and document recommended standalone defaults.
+  - 2026-03-10: Replaced the misleading standalone commit toggle with `terminal_commit_behavior: per_task`, kept `auto_push_every_commits` as the adjustable cadence control, documented recommended defaults in `README.md`, and ensured final push flushing depends only on pending integrated commits plus push cadence.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-cli.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts tests/unit/orchestrator.test.ts tests/unit/orchestrator-cli.test.ts README.md WORKFLOW.orchestrator.md WORKFLOW.md WORKFLOW.plugin.md docs/decisions.md docs/tasks-standalone-orchestrator.md`.
 
 Preserve and clarify the commit/push cadence behavior for standalone use.
 
 **Acceptance Criteria**
 
-- [ ] Per-task terminal commit behavior is documented or configurable
-- [ ] Push cadence is configurable
-- [ ] Workflow config exposes cadence clearly
-- [ ] README explains the recommended defaults
+- [x] Per-task terminal commit behavior is documented or configurable
+- [x] Push cadence is configurable
+- [x] Workflow config exposes cadence clearly
+- [x] README explains the recommended defaults
 
 ## Phase 2 - Adoption
 

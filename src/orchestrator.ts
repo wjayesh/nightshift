@@ -18,6 +18,8 @@ export type TaskStatus =
 
 export type TaskPriority = `P${number}` | "unscored";
 
+export type TerminalCommitBehavior = "per_task";
+
 export type WorkflowConfig = {
   name: string;
   taskSources: string[];
@@ -34,7 +36,7 @@ export type WorkflowConfig = {
   pollIntervalSeconds: number;
   completionPhrase: string;
   requiredBranch: string | null;
-  autoCommitOnDone: boolean;
+  terminalCommitBehavior: TerminalCommitBehavior;
   autoPushEveryCommits: number;
   workflowBody: string;
   workflowPath: string;
@@ -123,7 +125,7 @@ const DEFAULT_WORKFLOW: Omit<WorkflowConfig, "workflowBody" | "workflowPath"> =
     pollIntervalSeconds: 3,
     completionPhrase: "COMPLETE",
     requiredBranch: null,
-    autoCommitOnDone: true,
+    terminalCommitBehavior: "per_task",
     autoPushEveryCommits: 3,
   };
 
@@ -167,6 +169,23 @@ function parseStringList(
   }
 
   return fallback;
+}
+
+function parseTerminalCommitBehavior(
+  value: FrontMatterValue | undefined,
+  workflowPath: string,
+): TerminalCommitBehavior {
+  if (value === undefined) {
+    return DEFAULT_WORKFLOW.terminalCommitBehavior;
+  }
+
+  if (value === "per_task") {
+    return "per_task";
+  }
+
+  throw new Error(
+    `Unsupported terminal_commit_behavior in ${workflowPath}: ${String(value)}. Use "per_task".`,
+  );
 }
 
 export function runGit(args: string[], cwd: string) {
@@ -298,10 +317,10 @@ export function parseWorkflowFile(
       typeof frontMatter.required_branch === "string"
         ? frontMatter.required_branch
         : DEFAULT_WORKFLOW.requiredBranch,
-    autoCommitOnDone:
-      typeof frontMatter.auto_commit_on_done === "string"
-        ? frontMatter.auto_commit_on_done.toLowerCase() === "true"
-        : DEFAULT_WORKFLOW.autoCommitOnDone,
+    terminalCommitBehavior: parseTerminalCommitBehavior(
+      frontMatter.terminal_commit_behavior,
+      workflowPath,
+    ),
     autoPushEveryCommits:
       typeof frontMatter.auto_push_every_commits === "number"
         ? frontMatter.auto_push_every_commits
@@ -1353,7 +1372,6 @@ export function runOrchestratorLoop(
           workflow.requiredBranch ?? getCurrentBranch(repoRoot);
         if (
           integrationBranch &&
-          workflow.autoCommitOnDone &&
           isAutoPushEnabled(workflow) &&
           state.commitsSincePush > 0
         ) {
@@ -1522,7 +1540,6 @@ export function runOrchestratorLoop(
         workflow.requiredBranch ?? getCurrentBranch(repoRoot);
       if (
         integrationBranch &&
-        workflow.autoCommitOnDone &&
         isAutoPushEnabled(workflow) &&
         state.commitsSincePush > 0
       ) {

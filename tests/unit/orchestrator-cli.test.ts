@@ -76,7 +76,7 @@ function createWorkflowWithDependencies(
     "max_iterations: 10",
     "poll_interval_seconds: 0",
     "completion_phrase: COMPLETE",
-    "auto_commit_on_done: false",
+    "terminal_commit_behavior: per_task",
     "auto_push_every_commits: 0",
     "---",
     "# Workflow",

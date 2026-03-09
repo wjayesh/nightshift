@@ -22,7 +22,7 @@ instruction_files:
   - CLAUDE.md
 decision_file: docs/records/decisions.md
 workspace_mode: shared
-auto_commit_on_done: true
+terminal_commit_behavior: per_task
 auto_push_every_commits: 5
 required_branch: autonomous/server-integration
 ---
@@ -35,7 +35,7 @@ required_branch: autonomous/server-integration
     expect(workflow.instructionFiles).toEqual(["CLAUDE.md"]);
     expect(workflow.decisionFile).toBe("docs/records/decisions.md");
     expect(workflow.workspaceMode).toBe("shared");
-    expect(workflow.autoCommitOnDone).toBe(true);
+    expect(workflow.terminalCommitBehavior).toBe("per_task");
     expect(workflow.autoPushEveryCommits).toBe(5);
     expect(workflow.requiredBranch).toBe("autonomous/server-integration");
     expect(workflow.workflowBody).toContain("Body here");
@@ -55,6 +55,7 @@ required_branch: autonomous/server-integration
     expect(workflow.stateFile).toBe(".orchestrator/state.json");
     expect(workflow.workspaceRoot).toBe(".orchestrator/workspaces");
     expect(workflow.agentArgs).toEqual(["exec"]);
+    expect(workflow.terminalCommitBehavior).toBe("per_task");
   });
 
   it("accepts single-path workflow fields without list syntax", () => {
@@ -75,6 +76,16 @@ state_file: runtime/state.json
     expect(workflow.decisionFile).toEqual("docs/records/decisions.md");
     expect(workflow.agentArgs).toEqual(["--json"]);
     expect(getRuntimeRoot("/repo", workflow)).toBe(join("/repo", "runtime"));
+  });
+
+  it("rejects unsupported terminal commit behavior values", () => {
+    expect(() =>
+      parseWorkflowFile(`---
+terminal_commit_behavior: manual
+---
+# Workflow
+`),
+    ).toThrow(/terminal_commit_behavior/);
   });
 });
 

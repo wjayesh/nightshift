@@ -17,7 +17,7 @@ agent_args:
 max_iterations: 50
 poll_interval_seconds: 3
 completion_phrase: COMPLETE
-auto_commit_on_done: true
+terminal_commit_behavior: per_task
 # 0 disables automatic pushes; commits remain local until manually pushed.
 auto_push_every_commits: 0
 ---

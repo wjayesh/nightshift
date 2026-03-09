@@ -17,3 +17,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The standalone orchestrator needed a durable place for agents to record key implementation choices without depending on ephemeral terminal output or external tooling.
 - Decision: Add a `decision_file` workflow field, point the standalone workflow at this markdown log, and instruct agents to write dated `Context` / `Decision` / `Impact` entries when they make consequential choices.
 - Impact: Future runs can inspect implementation reasoning directly in the repo and git history, which makes the orchestrator easier to adopt and audit across tasks.
+
+## 2026-03-10 - ORCH-015 - Make terminal commits explicit and keep push cadence as the real knob
+
+- Context: The extracted standalone workflow still exposed `auto_commit_on_done`, but the runtime always commits terminal `done` or `blocked` work before integration, which made the config misleading.
+- Decision: Replace that knob with an explicit `terminal_commit_behavior: per_task` workflow field, keep `auto_push_every_commits` as the adjustable cadence control, and make the final push flush depend only on pending integrated commits plus the push cadence setting.
+- Impact: Standalone users now see the intended policy directly in workflow front matter and README docs: each finished task is committed deliberately, while local-vs-remote integration cadence is controlled only by the push threshold.

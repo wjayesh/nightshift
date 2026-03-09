@@ -19,9 +19,10 @@ max_iterations: 50
 poll_interval_seconds: 3
 completion_phrase: COMPLETE
 required_branch: autonomous/server-integration
-auto_commit_on_done: true
+terminal_commit_behavior: per_task
 auto_push_every_commits: 3
 ---
+
 # Mahilo Plugin Autonomous Workflow
 
 You are the implementation agent for the Mahilo OpenClaw plugin.

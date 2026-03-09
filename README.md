@@ -28,6 +28,21 @@ Each decision entry should stay easy to scan in plain git history:
 
 That keeps the repo’s reasoning alongside its code and task docs, instead of burying important tradeoffs inside transient terminal output.
 
+### Git Integration Cadence
+
+The standalone orchestrator keeps terminal task reconciliation explicit rather than treating git history as a side effect.
+
+- `terminal_commit_behavior: per_task` is the v1 policy: when a task reaches `done` or `blocked`, the orchestrator makes a deliberate terminal commit before integrating that task onto the shared branch.
+- `auto_push_every_commits: 3` is the recommended standalone default. The orchestrator pushes after every three integrated task commits, and it also flushes any remaining integrated commits when the workflow completes.
+- Set `auto_push_every_commits: 0` when you want the orchestrator to keep integration commits local until a human reviews and pushes them manually.
+
+```md
+terminal_commit_behavior: per_task
+auto_push_every_commits: 3
+```
+
+`WORKFLOW.orchestrator.md` uses `auto_push_every_commits: 0` in this repo so standalone extraction work stays local until intentionally published.
+
 ## Quick Start
 
 ### Prerequisites
