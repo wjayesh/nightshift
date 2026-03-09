@@ -186,6 +186,19 @@ The following are intentionally deferred to later tasks:
 - crash-hardening strategy
 - richer waiting semantics for dependencies outside the current repo
 
+## Later Runtime Hardening
+
+After the review loop and baseline adoption flow are in place, the next hardening layer should stay lean and local-first:
+
+- workflow-scoped worker locks so duplicate loops for the same workflow fail fast
+- dirty integration guards so cherry-picks do not run into a locally modified shared checkout
+- non-fatal retries and backoff for agent, runtime, and integration failures
+- runtime heartbeat and status files for operator inspection
+- a lightweight standalone supervisor that restarts stalled or dead workers
+- optional macOS `launchd` support for long-running personal use
+
+These features are worth carrying into the standalone repo because they improve correctness and operability without turning the orchestrator into a remote control plane.
+
 ## Success Criteria
 
 The standalone repo is successful when:

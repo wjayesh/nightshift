@@ -208,6 +208,9 @@ The standalone layout uses `.orchestrator/` for:
 - `reviews.md`: append-only review log written next to the configured
   `state_file`. It records each review batch, remediation task IDs, and the
   captured last-message path.
+- `worker-<workflow>.lock`: long-lived lock held for the lifetime of one
+  workflow loop so duplicate same-workflow starts fail fast in the same repo
+  clone.
 - `repo.lock`: short-lived lock used only around integration-branch mutation.
 - `<task-id>-last-message.txt`: the terminal agent message for each task.
 - `workspaces/`: shared task directories or git worktrees, depending on

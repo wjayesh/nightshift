@@ -258,7 +258,9 @@ Define how reviewer-created follow-up tasks are inserted and prioritized.
 - **ID**: `ORCH-032`
 - **Status**: `pending`
 - **Priority**: P1
-- **Depends on**: ORCH-011
+- **Depends on**: ORCH-040, ORCH-041, ORCH-042, ORCH-043, ORCH-044, ORCH-045
+- **Notes**:
+  - 2026-03-10: Expanded the broad crash-hardening goal into concrete runtime tasks `ORCH-040` through `ORCH-045` after reviewing the hardened Mahilo 2 orchestrator behavior.
 
 Add restart-friendly supervision for long-running loops.
 
@@ -282,3 +284,105 @@ Design explicit waiting semantics for dependencies that cannot run yet.
 - [ ] Waiting behavior is documented
 - [ ] Status model is defined
 - [ ] Cross-project dependency direction is clarified
+
+## Phase 4 - Runtime Hardening
+
+### 4.1 Add workflow-scoped worker lock
+
+- **ID**: `ORCH-040`
+- **Status**: `done`
+- **Priority**: P0
+- **Depends on**: ORCH-011
+- **Notes**:
+  - 2026-03-10: Started adding a long-lived workflow worker lock under the configured runtime root so duplicate same-workflow starts fail fast while stale locks are cleaned up safely.
+  - 2026-03-10: Added a lifetime worker lock keyed by workflow file under the configured runtime root, kept `repo.lock` short-lived for integration only, and covered duplicate-start plus stale-lock recovery with focused CLI tests.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-cli.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts` and `node node_modules/prettier/bin/prettier.cjs --write src/orchestrator.ts tests/unit/orchestrator-cli.test.ts README.md docs/decisions.md docs/tasks-standalone-orchestrator.md`.
+
+Prevent duplicate standalone workers for the same workflow in the same repo clone.
+
+**Acceptance Criteria**
+
+- [x] A workflow-scoped worker lock exists for the lifetime of the loop process
+- [x] The lock path is derived from the configured runtime root rather than hard-coded repo names
+- [x] Stale worker locks are cleaned up safely
+- [x] Duplicate same-workflow starts fail fast with a clear operator-facing error
+
+### 4.2 Guard dirty integration checkouts
+
+- **ID**: `ORCH-041`
+- **Status**: `pending`
+- **Priority**: P0
+- **Depends on**: ORCH-010
+
+Refuse git-worktree integration when the shared integration checkout has uncommitted changes.
+
+**Acceptance Criteria**
+
+- [ ] Git-worktree integration checks the shared checkout for pending changes before cherry-pick
+- [ ] Failure messages summarize the dirty paths clearly
+- [ ] Shared-workspace direct-commit mode is not blocked by this guard
+- [ ] Behavior is covered by focused tests
+
+### 4.3 Add non-fatal retries and backoff
+
+- **ID**: `ORCH-042`
+- **Status**: `pending`
+- **Priority**: P0
+- **Depends on**: ORCH-011
+
+Keep runtime, agent, and integration failures from killing the whole loop on the first error.
+
+**Acceptance Criteria**
+
+- [ ] Workflow config supports task failure retry limit and backoff settings
+- [ ] Agent, runtime, and integration failures leave the task `pending` unless the worker explicitly says `TASK_BLOCKED`
+- [ ] Retry timing and failure counts are persisted in orchestrator state
+- [ ] Progress and state make retry behavior easy to inspect later
+
+### 4.4 Add runtime heartbeat and status files
+
+- **ID**: `ORCH-043`
+- **Status**: `pending`
+- **Priority**: P0
+- **Depends on**: ORCH-042
+
+Expose durable runtime health signals for operators and future supervision.
+
+**Acceptance Criteria**
+
+- [ ] A runtime status file exists under the configured runtime root
+- [ ] Heartbeats include current phase, active task, iteration, and last note or error
+- [ ] Retry metadata is exposed in the runtime status file
+- [ ] README explains how to inspect runtime health
+
+### 4.5 Add standalone supervisor
+
+- **ID**: `ORCH-044`
+- **Status**: `pending`
+- **Priority**: P0
+- **Depends on**: ORCH-040, ORCH-042, ORCH-043
+
+Add a lightweight supervisor that restarts the standalone worker when it dies or stalls.
+
+**Acceptance Criteria**
+
+- [ ] A supervisor starts and watches the standalone orchestrator process
+- [ ] The supervisor restarts the worker after process death or runtime stall
+- [ ] Stall detection reads the runtime heartbeat or status file
+- [ ] Operator docs cover the start, stop, and status flow
+
+### 4.6 Add optional `launchd` support
+
+- **ID**: `ORCH-045`
+- **Status**: `pending`
+- **Priority**: P0
+- **Depends on**: ORCH-044
+
+Provide an optional macOS `launchd` installer without making it a core requirement.
+
+**Acceptance Criteria**
+
+- [ ] `launchd` support is optional and separate from the core loop
+- [ ] Generated plist content captures the required `PATH` and `HOME`
+- [ ] Install and uninstall docs exist for macOS operators
+- [ ] Non-macOS workflows remain unaffected

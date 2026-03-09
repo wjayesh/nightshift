@@ -118,10 +118,13 @@ export type OrchestratorRuntimeOptions = {
   sleep?: (milliseconds: number) => void;
 };
 
-type RepoLockOwner = {
+type RuntimeLockOwner = {
   pid: number | null;
   workflow: string;
-  taskId: string;
+  workflowPath?: string;
+  purpose?: "repo" | "worker";
+  detail?: string | null;
+  taskId?: string;
   acquiredAt: string;
 };
 
@@ -159,6 +162,7 @@ const STATUS_VALUES = new Set<TaskStatus>([
 
 const DEFAULT_WORKFLOW_FILE = "WORKFLOW.md";
 const REPO_LOCK_NAME = "repo.lock";
+const WORKER_LOCK_PREFIX = "worker";
 const LOCK_POLL_MS = 1000;
 const STALE_LOCK_MS = 60_000;
 
@@ -1416,6 +1420,13 @@ function getRepoLockPath(repoRoot: string, workflow: WorkflowConfig): string {
   return resolve(getRuntimeRoot(repoRoot, workflow), REPO_LOCK_NAME);
 }
 
+function getWorkerLockPath(repoRoot: string, workflow: WorkflowConfig): string {
+  return join(
+    getRuntimeRoot(repoRoot, workflow),
+    `${WORKER_LOCK_PREFIX}-${sanitizePathSegment(workflow.workflowPath)}.lock`,
+  );
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -1425,14 +1436,43 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function readLockOwner(lockPath: string): RepoLockOwner | null {
+function readLockOwner(lockPath: string): RuntimeLockOwner | null {
   const ownerPath = join(lockPath, "owner.json");
   if (!existsSync(ownerPath)) {
     return null;
   }
 
   try {
-    return JSON.parse(readFileSync(ownerPath, "utf8")) as RepoLockOwner;
+    const parsed = JSON.parse(
+      readFileSync(ownerPath, "utf8"),
+    ) as Partial<RuntimeLockOwner>;
+    return {
+      pid:
+        typeof parsed.pid === "number" &&
+        Number.isInteger(parsed.pid) &&
+        parsed.pid > 0
+          ? parsed.pid
+          : null,
+      workflow:
+        typeof parsed.workflow === "string" ? parsed.workflow : "unknown",
+      workflowPath:
+        typeof parsed.workflowPath === "string"
+          ? parsed.workflowPath
+          : undefined,
+      purpose:
+        parsed.purpose === "repo" || parsed.purpose === "worker"
+          ? parsed.purpose
+          : undefined,
+      detail:
+        typeof parsed.detail === "string"
+          ? parsed.detail
+          : typeof parsed.taskId === "string"
+            ? parsed.taskId
+            : null,
+      taskId: typeof parsed.taskId === "string" ? parsed.taskId : undefined,
+      acquiredAt:
+        typeof parsed.acquiredAt === "string" ? parsed.acquiredAt : "",
+    };
   } catch {
     return null;
   }
@@ -1444,8 +1484,13 @@ function tryRemoveStaleLock(lockPath: string): boolean {
   }
 
   const owner = readLockOwner(lockPath);
-  if (owner?.pid && isProcessAlive(owner.pid)) {
-    return false;
+  if (owner?.pid !== null && owner?.pid !== undefined) {
+    if (isProcessAlive(owner.pid)) {
+      return false;
+    }
+
+    rmSync(lockPath, { recursive: true, force: true });
+    return true;
   }
 
   let staleByAge = false;
@@ -1456,7 +1501,7 @@ function tryRemoveStaleLock(lockPath: string): boolean {
     staleByAge = true;
   }
 
-  if (!owner || staleByAge) {
+  if (staleByAge && (!owner || owner.pid === null || owner.pid === undefined)) {
     rmSync(lockPath, { recursive: true, force: true });
     return true;
   }
@@ -1464,42 +1509,119 @@ function tryRemoveStaleLock(lockPath: string): boolean {
   return false;
 }
 
-function acquireRepoLock(
-  repoRoot: string,
+function buildLockOwner(
   workflow: WorkflowConfig,
-  taskId: string,
+  purpose: "repo" | "worker",
+  detail: string | null,
+): RuntimeLockOwner {
+  return {
+    pid: typeof process.pid === "number" ? process.pid : null,
+    workflow: workflow.name,
+    workflowPath: workflow.workflowPath,
+    purpose,
+    detail,
+    taskId: purpose === "repo" && detail ? detail : undefined,
+    acquiredAt: new Date().toISOString(),
+  };
+}
+
+function formatLockOwnerSummary(owner: RuntimeLockOwner | null): string {
+  if (!owner) {
+    return "owner details unavailable";
+  }
+
+  const parts: string[] = [];
+  if (owner.pid !== null && owner.pid !== undefined) {
+    parts.push(`pid ${owner.pid}`);
+  }
+  if (owner.workflowPath) {
+    parts.push(`workflow file ${owner.workflowPath}`);
+  }
+  const detail = owner.detail ?? owner.taskId;
+  if (detail) {
+    parts.push(`detail ${detail}`);
+  }
+  if (owner.acquiredAt) {
+    parts.push(`acquired ${owner.acquiredAt}`);
+  }
+  return parts.join(", ") || "owner details unavailable";
+}
+
+function acquireRuntimeLock(
+  lockPath: string,
+  owner: RuntimeLockOwner,
+  options: {
+    waitOnConflict: boolean;
+    conflictMessage?: (
+      owner: RuntimeLockOwner | null,
+      lockPath: string,
+    ) => string;
+  },
 ): string {
-  const runtimeRoot = getRuntimeRoot(repoRoot, workflow);
-  const lockPath = getRepoLockPath(repoRoot, workflow);
-  mkdirSync(runtimeRoot, { recursive: true });
+  ensureDirectory(dirname(lockPath));
 
   while (true) {
     try {
       mkdirSync(lockPath);
-      const owner: RepoLockOwner = {
-        pid: process.pid,
-        workflow: workflow.name,
-        taskId,
-        acquiredAt: new Date().toISOString(),
-      };
-      writeFileSync(
-        join(lockPath, "owner.json"),
-        JSON.stringify(owner, null, 2),
-      );
+      try {
+        writeFileSync(
+          join(lockPath, "owner.json"),
+          JSON.stringify(owner, null, 2) + "\n",
+        );
+      } catch (writeError) {
+        rmSync(lockPath, { recursive: true, force: true });
+        throw writeError;
+      }
       return lockPath;
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       if (err.code !== "EEXIST") {
         throw error;
       }
-      if (!tryRemoveStaleLock(lockPath)) {
-        Bun.sleepSync(LOCK_POLL_MS);
+      if (tryRemoveStaleLock(lockPath)) {
+        continue;
       }
+      if (!options.waitOnConflict) {
+        const message =
+          options.conflictMessage?.(readLockOwner(lockPath), lockPath) ??
+          `Lock already exists at ${lockPath}.`;
+        throw new Error(message);
+      }
+      Bun.sleepSync(LOCK_POLL_MS);
     }
   }
 }
 
-function releaseRepoLock(lockPath: string) {
+function acquireRepoLock(
+  repoRoot: string,
+  workflow: WorkflowConfig,
+  taskId: string,
+): string {
+  const lockPath = getRepoLockPath(repoRoot, workflow);
+  return acquireRuntimeLock(
+    lockPath,
+    buildLockOwner(workflow, "repo", taskId),
+    { waitOnConflict: true },
+  );
+}
+
+function acquireWorkerLock(repoRoot: string, workflow: WorkflowConfig): string {
+  const lockPath = getWorkerLockPath(repoRoot, workflow);
+  return acquireRuntimeLock(
+    lockPath,
+    buildLockOwner(workflow, "worker", "loop"),
+    {
+      waitOnConflict: false,
+      conflictMessage: (owner, currentLockPath) => {
+        const displayLockPath =
+          relative(repoRoot, currentLockPath) || currentLockPath;
+        return `Workflow ${workflow.name} (${workflow.workflowPath}) already has an active worker in this repo clone. Worker lock: ${displayLockPath} (${formatLockOwnerSummary(owner)}). Stop the existing loop or remove the stale lock if that process is gone.`;
+      },
+    },
+  );
+}
+
+function releaseRuntimeLock(lockPath: string) {
   rmSync(lockPath, { recursive: true, force: true });
 }
 
@@ -1713,7 +1835,7 @@ function integrateReviewPass(params: {
       commitSha: cherryPickResult.lastCommitSha,
     };
   } finally {
-    releaseRepoLock(lockPath);
+    releaseRuntimeLock(lockPath);
   }
 }
 
@@ -2080,7 +2202,7 @@ function integrateTerminalTask(params: {
 
     return { historyNote, refreshedActionableTasks };
   } finally {
-    releaseRepoLock(lockPath);
+    releaseRuntimeLock(lockPath);
   }
 }
 
@@ -2108,47 +2230,233 @@ export function runOrchestratorLoop(
     return 1;
   }
 
-  const state = loadState(repoRoot, workflow);
-  const maxIterations = options.maxIterations ?? workflow.maxIterations;
+  const workerLockPath = acquireWorkerLock(repoRoot, workflow);
 
-  for (let loop = 0; loop < maxIterations; loop += 1) {
-    const { actionable, taskUniverse } = loadActionableTasks(
-      repoRoot,
-      options.workflowFile,
-    );
+  try {
+    const state = loadState(repoRoot, workflow);
+    const maxIterations = options.maxIterations ?? workflow.maxIterations;
 
-    if (shouldRunReview(workflow, state, actionable)) {
-      const reviewResult = executeReviewPass({
+    for (let loop = 0; loop < maxIterations; loop += 1) {
+      const { actionable, taskUniverse } = loadActionableTasks(
         repoRoot,
-        workflow,
-        actionableTasks: actionable,
-        state,
-        dryRun: options.dryRun,
-        log,
-      });
+        options.workflowFile,
+      );
 
-      if (reviewResult.stopAfterIteration) {
-        error(reviewResult.errorMessage ?? "Review pass failed.");
-        return 1;
+      if (shouldRunReview(workflow, state, actionable)) {
+        const reviewResult = executeReviewPass({
+          repoRoot,
+          workflow,
+          actionableTasks: actionable,
+          state,
+          dryRun: options.dryRun,
+          log,
+        });
+
+        if (reviewResult.stopAfterIteration) {
+          error(reviewResult.errorMessage ?? "Review pass failed.");
+          return 1;
+        }
+
+        if (options.once || options.dryRun) {
+          return 0;
+        }
+
+        continue;
       }
 
-      if (options.once || options.dryRun) {
-        return 0;
+      const task = selectNextTask(actionable, state.activeTaskId, taskUniverse);
+
+      if (!task) {
+        state.activeTaskId = null;
+        appendProgress(repoRoot, workflow, [
+          formatHistoryNote(null, "idle", "No ready tasks."),
+        ]);
+        saveState(repoRoot, workflow, state);
+
+        if (areAllTasksComplete(actionable)) {
+          const integrationBranch =
+            workflow.requiredBranch ?? getCurrentBranch(repoRoot);
+          if (
+            integrationBranch &&
+            isAutoPushEnabled(workflow) &&
+            state.commitsSincePush > 0
+          ) {
+            const pushResult = maybePushBranch(
+              repoRoot,
+              integrationBranch,
+              state.commitsSincePush,
+              true,
+            );
+            if (pushResult.error) {
+              error(`Final auto-push failed: ${pushResult.error}`);
+              return 1;
+            }
+            state.commitsSincePush = 0;
+            saveState(repoRoot, workflow, state);
+          }
+          log(workflow.completionPhrase);
+          return 0;
+        }
+
+        if (options.once) {
+          return 0;
+        }
+
+        const waitMs = workflow.pollIntervalSeconds * 1000;
+        if (waitMs > 0) {
+          sleep(waitMs);
+        }
+        continue;
       }
 
-      continue;
-    }
+      const workspacePreview = previewWorkspacePath(repoRoot, workflow, task);
+      const prompt = buildTaskPrompt(workflow, task, workspacePreview);
 
-    const task = selectNextTask(actionable, state.activeTaskId, taskUniverse);
-
-    if (!task) {
-      state.activeTaskId = null;
+      state.iteration += 1;
+      state.activeTaskId = task.id;
       appendProgress(repoRoot, workflow, [
-        formatHistoryNote(null, "idle", "No ready tasks."),
+        formatHistoryNote(
+          task.id,
+          task.id === state.lastCommittedTaskId ? "continued" : "started",
+          `Selected ${task.id} in ${workspacePreview === repoRoot ? "." : workspacePreview}.`,
+        ),
       ]);
       saveState(repoRoot, workflow, state);
 
-      if (areAllTasksComplete(actionable)) {
+      log(`\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`);
+      log(`Workspace: ${workspacePreview}`);
+
+      if (options.dryRun) {
+        log("Dry run selected task summary:");
+        log(`- Task: ${task.id}`);
+        log(`- Status: ${task.status}`);
+        log(`- Priority: ${task.priority}`);
+        log(`- Depends on: ${task.dependsOn.join(", ") || "None"}`);
+        log(
+          `- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`,
+        );
+        return 0;
+      }
+
+      const workspace = ensureWorkspace(repoRoot, workflow, task);
+      const runResult = runAgentForTask(
+        repoRoot,
+        workflow,
+        task,
+        workspace.path,
+        buildTaskPrompt(workflow, task, workspace.path),
+      );
+
+      let refreshedActionableTasks = actionable;
+      let historyStatus: "completed" | "blocked" | "agent_error" | "continued" =
+        "continued";
+      let historyNote = `Agent exited with code ${runResult.exitCode}.`;
+      let stopAfterIteration = false;
+
+      try {
+        const workspaceActionableTasks = loadTasks(
+          workspace.path,
+          workflow.taskSources,
+        );
+        const workspaceTask =
+          findTaskById(workspaceActionableTasks, task.id) ?? task;
+
+        if (runResult.exitCode !== 0) {
+          historyStatus = "agent_error";
+          historyNote = `Agent command failed: ${runResult.commandLine}`;
+          state.activeTaskId = null;
+          stopAfterIteration = true;
+        } else if (didTaskComplete(workspaceTask, runResult.lastMessage)) {
+          historyStatus = "completed";
+          state.activeTaskId = null;
+          const integrationResult = integrateTerminalTask({
+            repoRoot,
+            workflow,
+            task: workspaceTask,
+            terminalStatus: "completed",
+            rootActionableTasks: actionable,
+            state,
+          });
+          refreshedActionableTasks = integrationResult.refreshedActionableTasks;
+          historyNote = integrationResult.historyNote;
+        } else if (didTaskBlock(workspaceTask, runResult.lastMessage)) {
+          historyStatus = "blocked";
+          state.activeTaskId = null;
+          const integrationResult = integrateTerminalTask({
+            repoRoot,
+            workflow,
+            task: workspaceTask,
+            terminalStatus: "blocked",
+            rootActionableTasks: actionable,
+            state,
+          });
+          refreshedActionableTasks = integrationResult.refreshedActionableTasks;
+          historyNote = extractBlockedReason(task.id, runResult.lastMessage);
+          if (integrationResult.historyNote) {
+            historyNote = `${historyNote} ${integrationResult.historyNote}`;
+          }
+        } else {
+          historyStatus = "continued";
+          historyNote = `${task.id} remains ${workspaceTask.status}.`;
+          state.activeTaskId = task.id;
+        }
+
+        appendProgress(repoRoot, workflow, [
+          formatHistoryNote(task.id, historyStatus, historyNote),
+        ]);
+        state.history.push({
+          iteration: state.iteration,
+          taskId: task.id,
+          timestamp: new Date().toISOString(),
+          status: historyStatus,
+          note: historyNote,
+        });
+        saveState(repoRoot, workflow, state);
+      } catch (caughtError) {
+        historyStatus = "agent_error";
+        historyNote =
+          caughtError instanceof Error
+            ? caughtError.message
+            : String(caughtError);
+        state.activeTaskId = null;
+        appendProgress(repoRoot, workflow, [
+          formatHistoryNote(task.id, historyStatus, historyNote),
+        ]);
+        state.history.push({
+          iteration: state.iteration,
+          taskId: task.id,
+          timestamp: new Date().toISOString(),
+          status: historyStatus,
+          note: historyNote,
+        });
+        saveState(repoRoot, workflow, state);
+        stopAfterIteration = true;
+      }
+
+      if (stopAfterIteration) {
+        error(historyNote);
+        return 1;
+      }
+
+      if (shouldRunReview(workflow, state, refreshedActionableTasks)) {
+        const reviewResult = executeReviewPass({
+          repoRoot,
+          workflow,
+          actionableTasks: refreshedActionableTasks,
+          state,
+          dryRun: false,
+          log,
+        });
+
+        if (reviewResult.stopAfterIteration) {
+          error(reviewResult.errorMessage ?? "Review pass failed.");
+          return 1;
+        }
+
+        refreshedActionableTasks = reviewResult.refreshedActionableTasks;
+      }
+
+      if (areAllTasksComplete(refreshedActionableTasks)) {
         const integrationBranch =
           workflow.requiredBranch ?? getCurrentBranch(repoRoot);
         if (
@@ -2181,193 +2489,13 @@ export function runOrchestratorLoop(
       if (waitMs > 0) {
         sleep(waitMs);
       }
-      continue;
     }
 
-    const workspacePreview = previewWorkspacePath(repoRoot, workflow, task);
-    const prompt = buildTaskPrompt(workflow, task, workspacePreview);
-
-    state.iteration += 1;
-    state.activeTaskId = task.id;
-    appendProgress(repoRoot, workflow, [
-      formatHistoryNote(
-        task.id,
-        task.id === state.lastCommittedTaskId ? "continued" : "started",
-        `Selected ${task.id} in ${workspacePreview === repoRoot ? "." : workspacePreview}.`,
-      ),
-    ]);
-    saveState(repoRoot, workflow, state);
-
-    log(`\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`);
-    log(`Workspace: ${workspacePreview}`);
-
-    if (options.dryRun) {
-      log("Dry run selected task summary:");
-      log(`- Task: ${task.id}`);
-      log(`- Status: ${task.status}`);
-      log(`- Priority: ${task.priority}`);
-      log(`- Depends on: ${task.dependsOn.join(", ") || "None"}`);
-      log(
-        `- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`,
-      );
-      return 0;
-    }
-
-    const workspace = ensureWorkspace(repoRoot, workflow, task);
-    const runResult = runAgentForTask(
-      repoRoot,
-      workflow,
-      task,
-      workspace.path,
-      buildTaskPrompt(workflow, task, workspace.path),
-    );
-
-    let refreshedActionableTasks = actionable;
-    let historyStatus: "completed" | "blocked" | "agent_error" | "continued" =
-      "continued";
-    let historyNote = `Agent exited with code ${runResult.exitCode}.`;
-    let stopAfterIteration = false;
-
-    try {
-      const workspaceActionableTasks = loadTasks(
-        workspace.path,
-        workflow.taskSources,
-      );
-      const workspaceTask =
-        findTaskById(workspaceActionableTasks, task.id) ?? task;
-
-      if (runResult.exitCode !== 0) {
-        historyStatus = "agent_error";
-        historyNote = `Agent command failed: ${runResult.commandLine}`;
-        state.activeTaskId = null;
-        stopAfterIteration = true;
-      } else if (didTaskComplete(workspaceTask, runResult.lastMessage)) {
-        historyStatus = "completed";
-        state.activeTaskId = null;
-        const integrationResult = integrateTerminalTask({
-          repoRoot,
-          workflow,
-          task: workspaceTask,
-          terminalStatus: "completed",
-          rootActionableTasks: actionable,
-          state,
-        });
-        refreshedActionableTasks = integrationResult.refreshedActionableTasks;
-        historyNote = integrationResult.historyNote;
-      } else if (didTaskBlock(workspaceTask, runResult.lastMessage)) {
-        historyStatus = "blocked";
-        state.activeTaskId = null;
-        const integrationResult = integrateTerminalTask({
-          repoRoot,
-          workflow,
-          task: workspaceTask,
-          terminalStatus: "blocked",
-          rootActionableTasks: actionable,
-          state,
-        });
-        refreshedActionableTasks = integrationResult.refreshedActionableTasks;
-        historyNote = extractBlockedReason(task.id, runResult.lastMessage);
-        if (integrationResult.historyNote) {
-          historyNote = `${historyNote} ${integrationResult.historyNote}`;
-        }
-      } else {
-        historyStatus = "continued";
-        historyNote = `${task.id} remains ${workspaceTask.status}.`;
-        state.activeTaskId = task.id;
-      }
-
-      appendProgress(repoRoot, workflow, [
-        formatHistoryNote(task.id, historyStatus, historyNote),
-      ]);
-      state.history.push({
-        iteration: state.iteration,
-        taskId: task.id,
-        timestamp: new Date().toISOString(),
-        status: historyStatus,
-        note: historyNote,
-      });
-      saveState(repoRoot, workflow, state);
-    } catch (caughtError) {
-      historyStatus = "agent_error";
-      historyNote =
-        caughtError instanceof Error
-          ? caughtError.message
-          : String(caughtError);
-      state.activeTaskId = null;
-      appendProgress(repoRoot, workflow, [
-        formatHistoryNote(task.id, historyStatus, historyNote),
-      ]);
-      state.history.push({
-        iteration: state.iteration,
-        taskId: task.id,
-        timestamp: new Date().toISOString(),
-        status: historyStatus,
-        note: historyNote,
-      });
-      saveState(repoRoot, workflow, state);
-      stopAfterIteration = true;
-    }
-
-    if (stopAfterIteration) {
-      error(historyNote);
-      return 1;
-    }
-
-    if (shouldRunReview(workflow, state, refreshedActionableTasks)) {
-      const reviewResult = executeReviewPass({
-        repoRoot,
-        workflow,
-        actionableTasks: refreshedActionableTasks,
-        state,
-        dryRun: false,
-        log,
-      });
-
-      if (reviewResult.stopAfterIteration) {
-        error(reviewResult.errorMessage ?? "Review pass failed.");
-        return 1;
-      }
-
-      refreshedActionableTasks = reviewResult.refreshedActionableTasks;
-    }
-
-    if (areAllTasksComplete(refreshedActionableTasks)) {
-      const integrationBranch =
-        workflow.requiredBranch ?? getCurrentBranch(repoRoot);
-      if (
-        integrationBranch &&
-        isAutoPushEnabled(workflow) &&
-        state.commitsSincePush > 0
-      ) {
-        const pushResult = maybePushBranch(
-          repoRoot,
-          integrationBranch,
-          state.commitsSincePush,
-          true,
-        );
-        if (pushResult.error) {
-          error(`Final auto-push failed: ${pushResult.error}`);
-          return 1;
-        }
-        state.commitsSincePush = 0;
-        saveState(repoRoot, workflow, state);
-      }
-      log(workflow.completionPhrase);
-      return 0;
-    }
-
-    if (options.once) {
-      return 0;
-    }
-
-    const waitMs = workflow.pollIntervalSeconds * 1000;
-    if (waitMs > 0) {
-      sleep(waitMs);
-    }
+    log(`Reached max iterations without seeing ${workflow.completionPhrase}.`);
+    return 0;
+  } finally {
+    releaseRuntimeLock(workerLockPath);
   }
-
-  log(`Reached max iterations without seeing ${workflow.completionPhrase}.`);
-  return 0;
 }
 
 export function runOrchestratorCli(

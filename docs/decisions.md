@@ -41,3 +41,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The standalone loop needed a built-in review pass that could run on a fixed cadence, inspect the right recently completed tasks, and persist outcomes durably without introducing a separate service or database.
 - Decision: Add a `review_every_tasks` workflow field, track reviewed completion batches in the persisted state, build review prompts from the next unreviewed batch of completed tasks plus their saved last messages, and let the review pass create `P0` remediation tasks directly in the task docs.
 - Impact: Standalone workflows now have an explicit review cadence with durable state/progress artifacts and review-generated follow-up work, while older Mahilo-specific workflows can keep review automation disabled by setting `review_every_tasks: 0`.
+
+## 2026-03-10 - ORCH-040 - Keep one long-lived worker lock per workflow file
+
+- Context: The standalone loop already had a short-lived `repo.lock` for integration, but it could still start duplicate workers for the same workflow in one repo clone, and the lock location needed to follow workflow runtime configuration instead of repo-specific names.
+- Decision: Add a lifetime worker lock under the configured runtime root, derive its filename from the workflow file path, fail fast when that lock is already owned by a live process, and only reclaim stale lock directories when the recorded PID is dead or the lock has aged out without valid owner metadata.
+- Impact: Duplicate same-workflow starts now stop immediately with a clear operator message, multiple workflows can coexist when they use distinct runtime artifacts, and stale worker locks can be cleaned up safely without changing the short-lived integration `repo.lock`.

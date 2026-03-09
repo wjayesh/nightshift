@@ -18,7 +18,9 @@ max_iterations: 50
 poll_interval_seconds: 3
 completion_phrase: COMPLETE
 terminal_commit_behavior: per_task
-review_every_tasks: 3
+# Temporarily disabled for the hardening sprint so the queue starts with
+# runtime-safety work instead of retroactive reviews of earlier tasks.
+review_every_tasks: 0
 # 0 disables automatic pushes; commits remain local until manually pushed.
 auto_push_every_commits: 0
 ---

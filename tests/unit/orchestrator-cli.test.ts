@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 
 const CLI_SCRIPT_PATH = join(process.cwd(), "scripts/orchestrator.ts");
@@ -54,7 +54,20 @@ function createWorkflow(taskSource: string): string {
 function createWorkflowWithDependencies(
   taskSource: string,
   dependencySources: string[] = [],
+  options: {
+    progressFile?: string;
+    stateFile?: string;
+    workspaceRoot?: string;
+    pollIntervalSeconds?: number;
+    maxIterations?: number;
+  } = {},
 ): string {
+  const progressFile = options.progressFile ?? ".orchestrator/progress.md";
+  const stateFile = options.stateFile ?? ".orchestrator/state.json";
+  const workspaceRoot = options.workspaceRoot ?? ".orchestrator/workspaces";
+  const pollIntervalSeconds = options.pollIntervalSeconds ?? 0;
+  const maxIterations = options.maxIterations ?? 10;
+
   return [
     "---",
     "name: cli-test",
@@ -66,15 +79,15 @@ function createWorkflowWithDependencies(
           ...dependencySources.map((dependency) => `  - ${dependency}`),
         ]
       : []),
-    "progress_file: .orchestrator/progress.md",
-    "state_file: .orchestrator/state.json",
-    "workspace_root: .orchestrator/workspaces",
+    `progress_file: ${progressFile}`,
+    `state_file: ${stateFile}`,
+    `workspace_root: ${workspaceRoot}`,
     "workspace_mode: shared",
     `agent_command: "${RUNTIME_BINARY}"`,
     "agent_args:",
     "  - fake-agent.cjs",
-    "max_iterations: 10",
-    "poll_interval_seconds: 0",
+    `max_iterations: ${maxIterations}`,
+    `poll_interval_seconds: ${pollIntervalSeconds}`,
     "completion_phrase: COMPLETE",
     "terminal_commit_behavior: per_task",
     "auto_push_every_commits: 0",
@@ -120,6 +133,27 @@ function runGit(repoRoot: string, args: string[]) {
     cwd: repoRoot,
     encoding: "utf8",
   });
+}
+
+async function waitForPath(path: string, timeoutMs = 5000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (existsSync(path)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
+function waitForExit(child: ReturnType<typeof spawn>) {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    },
+  );
 }
 
 afterEach(() => {
@@ -177,6 +211,116 @@ describe("standalone orchestrator CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("- Task: TASK-ALT");
     expect(result.stdout).not.toContain("- Task: TASK-001");
+  });
+
+  it("keeps a workflow-scoped worker lock for the loop lifetime and fails fast on duplicate starts", async () => {
+    const repoRoot = createTempRepo();
+
+    writeFileSync(
+      join(repoRoot, "docs/stalled-tasks.md"),
+      `### Waiting Task
+- **ID**: \`TASK-WAIT\`
+- **Status**: \`pending\`
+- **Priority**: P0
+- **Depends on**: MISSING-001
+`,
+    );
+    writeFileSync(
+      join(repoRoot, "WORKFLOW.runtime-lock.md"),
+      createWorkflowWithDependencies("docs/stalled-tasks.md", [], {
+        progressFile: ".orchestrator/runtime/progress.md",
+        stateFile: ".orchestrator/runtime/state.json",
+        pollIntervalSeconds: 5,
+        maxIterations: 5,
+      }),
+    );
+
+    const lockPath = join(
+      repoRoot,
+      ".orchestrator/runtime/worker-workflow.runtime-lock.md.lock",
+    );
+    const child = spawn(
+      RUNTIME_BINARY,
+      [CLI_SCRIPT_PATH, "--workflow", "WORKFLOW.runtime-lock.md"],
+      {
+        cwd: repoRoot,
+        stdio: "pipe",
+      },
+    );
+    const exitPromise = waitForExit(child);
+
+    try {
+      await waitForPath(lockPath);
+      expect(existsSync(lockPath)).toBe(true);
+
+      const startedAt = Date.now();
+      const result = runCli(repoRoot, [
+        "--once",
+        "--workflow",
+        "WORKFLOW.runtime-lock.md",
+      ]);
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(result.status).toBe(1);
+      expect(elapsedMs).toBeLessThan(3000);
+      expect(result.stderr).toContain("already has an active worker");
+      expect(result.stderr).toContain("WORKFLOW.runtime-lock.md");
+      expect(result.stderr).toContain(
+        "Worker lock: .orchestrator/runtime/worker-workflow.runtime-lock.md.lock",
+      );
+    } finally {
+      child.kill("SIGTERM");
+      await exitPromise;
+    }
+  });
+
+  it("removes stale worker locks before starting the workflow again", () => {
+    const repoRoot = createTempRepo();
+
+    writeFileSync(
+      join(repoRoot, "docs/runtime-tasks.md"),
+      createTaskDoc("TASK-RUNTIME", "Runtime Task"),
+    );
+    writeFileSync(
+      join(repoRoot, "WORKFLOW.runtime-lock.md"),
+      createWorkflowWithDependencies("docs/runtime-tasks.md", [], {
+        progressFile: ".orchestrator/runtime/progress.md",
+        stateFile: ".orchestrator/runtime/state.json",
+      }),
+    );
+
+    const lockPath = join(
+      repoRoot,
+      ".orchestrator/runtime/worker-workflow.runtime-lock.md.lock",
+    );
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(
+      join(lockPath, "owner.json"),
+      JSON.stringify(
+        {
+          pid: 999999,
+          workflow: "cli-test",
+          workflowPath: "WORKFLOW.runtime-lock.md",
+          purpose: "worker",
+          detail: "loop",
+          acquiredAt: "2026-03-10T00:00:00.000Z",
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const result = runCli(repoRoot, [
+      "--once",
+      "--dry-run",
+      "--workflow",
+      "WORKFLOW.runtime-lock.md",
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("- Task: TASK-RUNTIME");
+    expect(result.stderr).toBe("");
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("uses workflow dependency_sources during task selection", () => {
