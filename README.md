@@ -214,11 +214,16 @@ The standalone layout uses `.orchestrator/` for:
   metadata.
 - `heartbeat.json`: lightweight heartbeat view with the current phase, active
   task, iteration, and last note or error for simple polling or stall checks.
+- `supervisor-status.json`: the supervisor's current state, restart count,
+  worker PID, and last restart reason when supervised mode is running.
 - `reviews.md`: append-only review log written next to the configured
   `state_file`. It records each review batch, remediation task IDs, and the
   captured last-message path.
 - `worker-<workflow>.lock`: long-lived lock held for the lifetime of one
   workflow loop so duplicate same-workflow starts fail fast in the same repo
+  clone.
+- `supervisor-<workflow>.lock`: long-lived lock held for the lifetime of one
+  supervisor so duplicate same-workflow supervisors fail fast in the same repo
   clone.
 - `repo.lock`: short-lived lock used only around integration-branch mutation.
 - `<task-id>-last-message.txt`: the terminal agent message for each task.
@@ -228,7 +233,8 @@ The standalone layout uses `.orchestrator/` for:
 In this repo, the standalone workflow writes the same artifact types with
 workflow-specific filenames such as `orchestrator-progress.md`,
 `orchestrator-state.json`, `orchestrator-status.json`,
-`orchestrator-heartbeat.json`, and `orchestrator-reviews.md`.
+`orchestrator-heartbeat.json`, `orchestrator-supervisor-status.json`, and
+`orchestrator-reviews.md`.
 
 ## Inspect Runtime Health
 
@@ -250,6 +256,46 @@ The most useful fields are:
   and the next scheduled retry time.
 - `waitingUntil`: when a sleeping worker expects to wake up for the next poll
   or retry window.
+
+## Supervisor
+
+Use the supervisor when you want the standalone worker to come back after a
+process crash or a stalled runtime heartbeat.
+
+Run the supervisor in the foreground:
+
+```bash
+bun run scripts/orchestrator-supervisor.ts run --workflow WORKFLOW.orchestrator.md
+```
+
+Start it in the background:
+
+```bash
+bun run scripts/orchestrator-supervisor.ts start --workflow WORKFLOW.orchestrator.md
+```
+
+Inspect current supervisor and worker state:
+
+```bash
+bun run scripts/orchestrator-supervisor.ts status --workflow WORKFLOW.orchestrator.md
+jq . .orchestrator/orchestrator-supervisor-status.json
+```
+
+Stop the background supervisor and its current worker:
+
+```bash
+bun run scripts/orchestrator-supervisor.ts stop --workflow WORKFLOW.orchestrator.md
+```
+
+The supervisor polls the worker's `status.json` and falls back to
+`heartbeat.json` when needed. It also respects `waitingUntil`, so a worker that
+is intentionally sleeping for the next poll or retry window does not look
+stalled just because its heartbeat is older.
+
+Set `--stall-seconds` higher than the longest expected uninterrupted task run.
+The worker refreshes runtime health at loop transitions, not continuously while
+the agent command is still running, so a very aggressive stall timeout will
+restart healthy long-running tasks.
 
 ## Decision Docs
 

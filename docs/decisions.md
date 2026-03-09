@@ -77,3 +77,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: Operators and the upcoming supervisor loop need a durable health signal that is easier to poll than the full progress log or state history, but adding new workflow knobs just for file names would widen the standalone surface area.
 - Decision: Write sibling `status.json` and `heartbeat.json` files under the configured runtime root, derive their names from `state_file`, and update them at major loop transitions with the current phase, active task, iteration, last note or error, and retry metadata.
 - Impact: Repos now get predictable runtime health files such as `.orchestrator/status.json` or `.orchestrator/orchestrator-status.json`, operators can inspect retry/backoff state without digging through `state.json`, and the future supervisor can poll the same heartbeat surface for stall detection.
+
+## 2026-03-10 - ORCH-044 - Keep supervision as a repo-local CLI with status polling
+
+- Context: The standalone repo needed automatic worker restarts plus a clear operator start/stop/status flow, but adding a daemon framework or new workflow configuration surface would make the extracted repo heavier than intended.
+- Decision: Add a separate `scripts/orchestrator-supervisor.ts` CLI with `run`, `start`, `stop`, and `status` commands, keep one supervisor lock and `supervisor-status.json` under the workflow runtime root, and detect stalls by polling `status.json` with a fallback to `heartbeat.json` while honoring `waitingUntil` for intentional sleeps.
+- Impact: Operators can run one local supervisor per workflow without external services, dead or stalled workers restart automatically, and repos gain a durable supervision artifact; the stall timeout still needs to stay above the longest expected uninterrupted task run because worker heartbeats only advance at loop transitions.

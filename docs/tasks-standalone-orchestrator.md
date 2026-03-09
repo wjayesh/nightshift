@@ -405,9 +405,13 @@ Expose durable runtime health signals for operators and future supervision.
 ### 4.5 Add standalone supervisor
 
 - **ID**: `ORCH-044`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-040, ORCH-042, ORCH-043
+- **Notes**:
+  - 2026-03-10: Added a dedicated `scripts/orchestrator-supervisor.ts` CLI with foreground/background start flow, workflow-scoped supervisor locks, and a durable `supervisor-status.json` artifact under the runtime root.
+  - 2026-03-10: The supervisor now restarts dead workers, treats stale runtime health as a stall by polling `status.json` with a `heartbeat.json` fallback, and respects `waitingUntil` so intentional sleep windows are not restarted as hangs.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator-supervisor.test.ts tests/unit/orchestrator-cli.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts`.
 
 Add a lightweight supervisor that restarts the standalone worker when it dies or stalls.
 

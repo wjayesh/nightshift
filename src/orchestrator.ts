@@ -14,7 +14,7 @@ import {
   relative,
   resolve,
 } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 export type TaskStatus =
   | "pending"
@@ -182,11 +182,87 @@ export type OrchestratorRuntimeOptions = {
   sleep?: (milliseconds: number) => void;
 };
 
+export type OrchestratorSupervisorCliCommand =
+  | "run"
+  | "start"
+  | "stop"
+  | "status";
+
+export type OrchestratorSupervisorCliOptions = {
+  command: OrchestratorSupervisorCliCommand;
+  workflowFile: string;
+  stallSeconds: number;
+  checkIntervalSeconds: number;
+  restartDelaySeconds: number;
+  help: boolean;
+};
+
+export type OrchestratorSupervisorRuntimeOptions = {
+  repoRoot?: string;
+  log?: (message: string) => void;
+  error?: (message: string) => void;
+  sleep?: (milliseconds: number) => Promise<void>;
+  scriptPath?: string;
+};
+
+export type OrchestratorSupervisorState =
+  | "starting"
+  | "running"
+  | "restarting"
+  | "stopping"
+  | "stopped"
+  | "error";
+
+export type OrchestratorSupervisorWorkerSource =
+  | "status"
+  | "heartbeat"
+  | "missing"
+  | "invalid";
+
+export type OrchestratorSupervisorWorkerSnapshot = {
+  pid: number | null;
+  source: OrchestratorSupervisorWorkerSource;
+  phase: OrchestratorRuntimePhase | null;
+  activeTaskId: string | null;
+  heartbeatAt: string | null;
+  waitingUntil: string | null;
+  lastNote: string | null;
+  lastError: string | null;
+};
+
+export type OrchestratorSupervisorStatus = {
+  workflowName: string;
+  workflowPath: string;
+  pid: number;
+  state: OrchestratorSupervisorState;
+  startedAt: string;
+  updatedAt: string;
+  stallSeconds: number;
+  checkIntervalSeconds: number;
+  restartDelaySeconds: number;
+  restartCount: number;
+  lastRestartAt: string | null;
+  lastRestartReason: string | null;
+  lastWorkerExitCode: number | null;
+  lastWorkerSignal: string | null;
+  worker: {
+    pid: number | null;
+    startedAt: string | null;
+    source: OrchestratorSupervisorWorkerSource;
+    phase: OrchestratorRuntimePhase | null;
+    activeTaskId: string | null;
+    heartbeatAt: string | null;
+    waitingUntil: string | null;
+    lastNote: string | null;
+    lastError: string | null;
+  };
+};
+
 type RuntimeLockOwner = {
   pid: number | null;
   workflow: string;
   workflowPath?: string;
-  purpose?: "repo" | "worker";
+  purpose?: "repo" | "worker" | "supervisor";
   detail?: string | null;
   taskId?: string;
   acquiredAt: string;
@@ -238,8 +314,13 @@ const STATUS_VALUES = new Set<TaskStatus>([
 const DEFAULT_WORKFLOW_FILE = "WORKFLOW.md";
 const REPO_LOCK_NAME = "repo.lock";
 const WORKER_LOCK_PREFIX = "worker";
+const SUPERVISOR_LOCK_PREFIX = "supervisor";
 const LOCK_POLL_MS = 1000;
 const STALE_LOCK_MS = 60_000;
+const DEFAULT_SUPERVISOR_STALL_SECONDS = 1800;
+const DEFAULT_SUPERVISOR_CHECK_INTERVAL_SECONDS = 5;
+const DEFAULT_SUPERVISOR_RESTART_DELAY_SECONDS = 3;
+const PROCESS_EXIT_POLL_MS = 100;
 
 function parseScalarValue(value: string): string | number {
   const trimmed = value.trim();
@@ -627,6 +708,13 @@ export function getRuntimeHeartbeatPath(
   config: Pick<WorkflowConfig, "stateFile">,
 ) {
   return getRuntimeArtifactPath(repoRoot, config, "heartbeat.json");
+}
+
+export function getSupervisorStatusPath(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+) {
+  return getRuntimeArtifactPath(repoRoot, config, "supervisor-status.json");
 }
 
 export function loadTasks(repoRoot: string, taskSources: string[]): Task[] {
@@ -1868,6 +1956,20 @@ function parseIterationCount(rawValue: string): number {
   return value;
 }
 
+function parseIntegerFlag(
+  rawValue: string,
+  flag: string,
+  options: { min: number },
+): number {
+  const value = Number(rawValue);
+  if (!Number.isInteger(value) || value < options.min) {
+    const qualifier =
+      options.min === 0 ? "a non-negative integer" : "a positive integer";
+    throw new Error(`${flag} must be ${qualifier}.`);
+  }
+  return value;
+}
+
 function readCliValue(argv: string[], index: number, flag: string): string {
   const value = argv[index + 1];
   if (value === undefined) {
@@ -1957,6 +2059,137 @@ export function parseOrchestratorCliArgs(
   return options;
 }
 
+export function formatOrchestratorSupervisorCliUsage(
+  scriptPath = "scripts/orchestrator-supervisor.ts",
+): string {
+  return [
+    `Usage: bun run ${scriptPath} [command] [options]`,
+    "",
+    "Commands:",
+    "  run                    Run the supervisor in the foreground (default)",
+    "  start                  Start the supervisor in the background",
+    "  stop                   Stop the background supervisor for the workflow",
+    "  status                 Show the current supervisor and worker state",
+    "",
+    "Options:",
+    `  --workflow <path>              Workflow file to load (default: ${DEFAULT_WORKFLOW_FILE})`,
+    `  --stall-seconds <n>            Restart when runtime health stays stale this long (default: ${DEFAULT_SUPERVISOR_STALL_SECONDS})`,
+    `  --check-interval-seconds <n>   How often to poll runtime health (default: ${DEFAULT_SUPERVISOR_CHECK_INTERVAL_SECONDS})`,
+    `  --restart-delay-seconds <n>    Wait before restarting a dead or stalled worker (default: ${DEFAULT_SUPERVISOR_RESTART_DELAY_SECONDS})`,
+    "  --help                         Show this help text",
+  ].join("\n");
+}
+
+export function parseOrchestratorSupervisorCliArgs(
+  argv: string[],
+): OrchestratorSupervisorCliOptions {
+  const options: OrchestratorSupervisorCliOptions = {
+    command: "run",
+    workflowFile: DEFAULT_WORKFLOW_FILE,
+    stallSeconds: DEFAULT_SUPERVISOR_STALL_SECONDS,
+    checkIntervalSeconds: DEFAULT_SUPERVISOR_CHECK_INTERVAL_SECONDS,
+    restartDelaySeconds: DEFAULT_SUPERVISOR_RESTART_DELAY_SECONDS,
+    help: false,
+  };
+
+  let index = 0;
+  const firstArg = argv[0];
+  if (
+    firstArg === "run" ||
+    firstArg === "start" ||
+    firstArg === "stop" ||
+    firstArg === "status"
+  ) {
+    options.command = firstArg;
+    index = 1;
+  }
+
+  for (; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    if (arg === "--help" || arg === "-h") {
+      options.help = true;
+      continue;
+    }
+
+    if (arg.startsWith("--workflow=")) {
+      const workflowFile = arg.slice("--workflow=".length);
+      if (!workflowFile) {
+        throw new Error("--workflow requires a value.");
+      }
+      options.workflowFile = workflowFile;
+      continue;
+    }
+
+    if (arg === "--workflow") {
+      options.workflowFile = readCliValue(argv, index, "--workflow");
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--stall-seconds=")) {
+      options.stallSeconds = parseIntegerFlag(
+        arg.slice("--stall-seconds=".length),
+        "--stall-seconds",
+        { min: 1 },
+      );
+      continue;
+    }
+
+    if (arg === "--stall-seconds") {
+      options.stallSeconds = parseIntegerFlag(
+        readCliValue(argv, index, "--stall-seconds"),
+        "--stall-seconds",
+        { min: 1 },
+      );
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--check-interval-seconds=")) {
+      options.checkIntervalSeconds = parseIntegerFlag(
+        arg.slice("--check-interval-seconds=".length),
+        "--check-interval-seconds",
+        { min: 1 },
+      );
+      continue;
+    }
+
+    if (arg === "--check-interval-seconds") {
+      options.checkIntervalSeconds = parseIntegerFlag(
+        readCliValue(argv, index, "--check-interval-seconds"),
+        "--check-interval-seconds",
+        { min: 1 },
+      );
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--restart-delay-seconds=")) {
+      options.restartDelaySeconds = parseIntegerFlag(
+        arg.slice("--restart-delay-seconds=".length),
+        "--restart-delay-seconds",
+        { min: 0 },
+      );
+      continue;
+    }
+
+    if (arg === "--restart-delay-seconds") {
+      options.restartDelaySeconds = parseIntegerFlag(
+        readCliValue(argv, index, "--restart-delay-seconds"),
+        "--restart-delay-seconds",
+        { min: 0 },
+      );
+      index += 1;
+      continue;
+    }
+
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+
+  return options;
+}
+
 function getRepoLockPath(repoRoot: string, workflow: WorkflowConfig): string {
   return resolve(getRuntimeRoot(repoRoot, workflow), REPO_LOCK_NAME);
 }
@@ -1965,6 +2198,16 @@ function getWorkerLockPath(repoRoot: string, workflow: WorkflowConfig): string {
   return join(
     getRuntimeRoot(repoRoot, workflow),
     `${WORKER_LOCK_PREFIX}-${sanitizePathSegment(workflow.workflowPath)}.lock`,
+  );
+}
+
+function getSupervisorLockPath(
+  repoRoot: string,
+  workflow: WorkflowConfig,
+): string {
+  return join(
+    getRuntimeRoot(repoRoot, workflow),
+    `${SUPERVISOR_LOCK_PREFIX}-${sanitizePathSegment(workflow.workflowPath)}.lock`,
   );
 }
 
@@ -2001,7 +2244,9 @@ function readLockOwner(lockPath: string): RuntimeLockOwner | null {
           ? parsed.workflowPath
           : undefined,
       purpose:
-        parsed.purpose === "repo" || parsed.purpose === "worker"
+        parsed.purpose === "repo" ||
+        parsed.purpose === "worker" ||
+        parsed.purpose === "supervisor"
           ? parsed.purpose
           : undefined,
       detail:
@@ -2052,7 +2297,7 @@ function tryRemoveStaleLock(lockPath: string): boolean {
 
 function buildLockOwner(
   workflow: WorkflowConfig,
-  purpose: "repo" | "worker",
+  purpose: "repo" | "worker" | "supervisor",
   detail: string | null,
 ): RuntimeLockOwner {
   return {
@@ -2162,6 +2407,55 @@ function acquireWorkerLock(repoRoot: string, workflow: WorkflowConfig): string {
   );
 }
 
+function formatSupervisorConflictMessage(
+  repoRoot: string,
+  workflow: WorkflowConfig,
+  lockPath: string,
+  owner: RuntimeLockOwner | null,
+): string {
+  const displayLockPath = relative(repoRoot, lockPath) || lockPath;
+  return `Workflow ${workflow.name} (${workflow.workflowPath}) already has an active supervisor in this repo clone. Supervisor lock: ${displayLockPath} (${formatLockOwnerSummary(owner)}). Stop the existing supervisor or remove the stale lock if that process is gone.`;
+}
+
+function assertSupervisorCanStart(repoRoot: string, workflow: WorkflowConfig) {
+  const lockPath = getSupervisorLockPath(repoRoot, workflow);
+  if (!existsSync(lockPath)) {
+    return;
+  }
+  if (tryRemoveStaleLock(lockPath)) {
+    return;
+  }
+  throw new Error(
+    formatSupervisorConflictMessage(
+      repoRoot,
+      workflow,
+      lockPath,
+      readLockOwner(lockPath),
+    ),
+  );
+}
+
+function acquireSupervisorLock(
+  repoRoot: string,
+  workflow: WorkflowConfig,
+): string {
+  const lockPath = getSupervisorLockPath(repoRoot, workflow);
+  return acquireRuntimeLock(
+    lockPath,
+    buildLockOwner(workflow, "supervisor", "loop"),
+    {
+      waitOnConflict: false,
+      conflictMessage: (owner, currentLockPath) =>
+        formatSupervisorConflictMessage(
+          repoRoot,
+          workflow,
+          currentLockPath,
+          owner,
+        ),
+    },
+  );
+}
+
 function releaseRuntimeLock(lockPath: string) {
   rmSync(lockPath, { recursive: true, force: true });
 }
@@ -2172,6 +2466,361 @@ function loadActionableTasks(repoRoot: string, workflowPath: string) {
   const dependencies = loadTasks(repoRoot, workflow.dependencySources);
   const taskUniverse = mergeTaskUniverses(actionable, dependencies);
   return { workflow, actionable, taskUniverse };
+}
+
+type SupervisorWorkerProcess = {
+  child: ReturnType<typeof spawn>;
+  startedAt: Date;
+  exited: boolean;
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  error: string | null;
+};
+
+function normalizeRuntimePhase(
+  value: unknown,
+): OrchestratorRuntimePhase | null {
+  return value === "starting" ||
+    value === "running_task" ||
+    value === "integrating_task" ||
+    value === "running_review" ||
+    value === "integrating_review" ||
+    value === "idle" ||
+    value === "sleeping" ||
+    value === "completed" ||
+    value === "error"
+    ? value
+    : null;
+}
+
+function buildEmptySupervisorWorkerSnapshot(
+  source: OrchestratorSupervisorWorkerSource,
+): OrchestratorSupervisorWorkerSnapshot {
+  return {
+    pid: null,
+    source,
+    phase: null,
+    activeTaskId: null,
+    heartbeatAt: null,
+    waitingUntil: null,
+    lastNote: null,
+    lastError: null,
+  };
+}
+
+function readSupervisorWorkerSnapshot(
+  repoRoot: string,
+  workflow: Pick<WorkflowConfig, "stateFile">,
+  expectedPid?: number | null,
+): OrchestratorSupervisorWorkerSnapshot {
+  const statusPath = getRuntimeStatusPath(repoRoot, workflow);
+  const heartbeatPath = getRuntimeHeartbeatPath(repoRoot, workflow);
+  let sawArtifact = false;
+
+  if (existsSync(statusPath)) {
+    sawArtifact = true;
+    try {
+      const parsed = JSON.parse(
+        readFileSync(statusPath, "utf8"),
+      ) as Partial<OrchestratorRuntimeStatus>;
+      const pid =
+        typeof parsed.pid === "number" && parsed.pid > 0 ? parsed.pid : null;
+      if (
+        expectedPid === undefined ||
+        expectedPid === null ||
+        pid === expectedPid
+      ) {
+        return {
+          pid,
+          source: "status",
+          phase: normalizeRuntimePhase(parsed.phase),
+          activeTaskId:
+            typeof parsed.activeTaskId === "string"
+              ? parsed.activeTaskId
+              : null,
+          heartbeatAt:
+            typeof parsed.heartbeatAt === "string" ? parsed.heartbeatAt : null,
+          waitingUntil:
+            typeof parsed.waitingUntil === "string"
+              ? parsed.waitingUntil
+              : null,
+          lastNote:
+            typeof parsed.lastNote === "string" ? parsed.lastNote : null,
+          lastError:
+            typeof parsed.lastError === "string" ? parsed.lastError : null,
+        };
+      }
+    } catch {
+      // Fall back to heartbeat.json when status.json is missing or invalid.
+    }
+  }
+
+  if (existsSync(heartbeatPath)) {
+    sawArtifact = true;
+    try {
+      const parsed = JSON.parse(
+        readFileSync(heartbeatPath, "utf8"),
+      ) as Partial<OrchestratorHeartbeat>;
+      const pid =
+        typeof parsed.pid === "number" && parsed.pid > 0 ? parsed.pid : null;
+      if (
+        expectedPid === undefined ||
+        expectedPid === null ||
+        pid === expectedPid
+      ) {
+        return {
+          pid,
+          source: "heartbeat",
+          phase: normalizeRuntimePhase(parsed.phase),
+          activeTaskId:
+            typeof parsed.activeTaskId === "string"
+              ? parsed.activeTaskId
+              : null,
+          heartbeatAt:
+            typeof parsed.heartbeatAt === "string" ? parsed.heartbeatAt : null,
+          waitingUntil: null,
+          lastNote:
+            typeof parsed.lastNote === "string" ? parsed.lastNote : null,
+          lastError:
+            typeof parsed.lastError === "string" ? parsed.lastError : null,
+        };
+      }
+    } catch {
+      // Return an invalid marker if neither runtime health file is readable.
+    }
+  }
+
+  return buildEmptySupervisorWorkerSnapshot(
+    sawArtifact ? "invalid" : "missing",
+  );
+}
+
+function loadSupervisorStatus(
+  repoRoot: string,
+  workflow: Pick<WorkflowConfig, "stateFile">,
+): OrchestratorSupervisorStatus | null {
+  const statusPath = getSupervisorStatusPath(repoRoot, workflow);
+  if (!existsSync(statusPath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(
+      readFileSync(statusPath, "utf8"),
+    ) as OrchestratorSupervisorStatus;
+  } catch {
+    return null;
+  }
+}
+
+function saveSupervisorStatus(
+  repoRoot: string,
+  workflow: Pick<WorkflowConfig, "stateFile">,
+  status: OrchestratorSupervisorStatus,
+) {
+  const runtimeRoot = getRuntimeRoot(repoRoot, workflow);
+  const statusPath = getSupervisorStatusPath(repoRoot, workflow);
+  ensureDirectory(runtimeRoot);
+  writeFileSync(statusPath, JSON.stringify(status, null, 2) + "\n");
+}
+
+function buildSupervisorStatus(
+  workflow: Pick<WorkflowConfig, "name" | "workflowPath">,
+  options: Pick<
+    OrchestratorSupervisorCliOptions,
+    "stallSeconds" | "checkIntervalSeconds" | "restartDelaySeconds"
+  >,
+  startedAt: Date,
+): OrchestratorSupervisorStatus {
+  return {
+    workflowName: workflow.name,
+    workflowPath: workflow.workflowPath,
+    pid: process.pid,
+    state: "starting",
+    startedAt: startedAt.toISOString(),
+    updatedAt: startedAt.toISOString(),
+    stallSeconds: options.stallSeconds,
+    checkIntervalSeconds: options.checkIntervalSeconds,
+    restartDelaySeconds: options.restartDelaySeconds,
+    restartCount: 0,
+    lastRestartAt: null,
+    lastRestartReason: null,
+    lastWorkerExitCode: null,
+    lastWorkerSignal: null,
+    worker: {
+      pid: null,
+      startedAt: null,
+      source: "missing",
+      phase: null,
+      activeTaskId: null,
+      heartbeatAt: null,
+      waitingUntil: null,
+      lastNote: null,
+      lastError: null,
+    },
+  };
+}
+
+async function sleepAsync(
+  milliseconds: number,
+  sleep?: (milliseconds: number) => Promise<void>,
+) {
+  if (milliseconds <= 0) {
+    return;
+  }
+
+  if (sleep) {
+    await sleep(milliseconds);
+    return;
+  }
+
+  await Bun.sleep(milliseconds);
+}
+
+function sendSignalToProcessTree(pid: number, signal: NodeJS.Signals): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs: number,
+  sleep?: (milliseconds: number) => Promise<void>,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) {
+      return true;
+    }
+    await sleepAsync(PROCESS_EXIT_POLL_MS, sleep);
+  }
+  return !isProcessAlive(pid);
+}
+
+async function terminateProcessTree(
+  pid: number | null,
+  sleep?: (milliseconds: number) => Promise<void>,
+) {
+  if (!pid || !isProcessAlive(pid)) {
+    return;
+  }
+
+  sendSignalToProcessTree(pid, "SIGTERM");
+  if (await waitForProcessExit(pid, 5000, sleep)) {
+    return;
+  }
+
+  sendSignalToProcessTree(pid, "SIGKILL");
+  await waitForProcessExit(pid, 2000, sleep);
+}
+
+function cleanupWorkerLock(repoRoot: string, workflow: WorkflowConfig) {
+  tryRemoveStaleLock(getWorkerLockPath(repoRoot, workflow));
+}
+
+function startSupervisorWorker(
+  repoRoot: string,
+  workflowFile: string,
+  workerScriptPath: string,
+): SupervisorWorkerProcess {
+  const stdio =
+    process.stdout.isTTY || process.stderr.isTTY ? "inherit" : "ignore";
+  const child = spawn(
+    process.execPath,
+    [workerScriptPath, "--workflow", workflowFile],
+    {
+      cwd: repoRoot,
+      detached: true,
+      stdio,
+      env: process.env,
+    },
+  );
+  const managed: SupervisorWorkerProcess = {
+    child,
+    startedAt: new Date(),
+    exited: false,
+    exitCode: null,
+    exitSignal: null,
+    error: null,
+  };
+
+  child.once("exit", (code, signal) => {
+    managed.exited = true;
+    managed.exitCode = code;
+    managed.exitSignal = signal;
+  });
+  child.once("error", (error) => {
+    managed.exited = true;
+    managed.exitCode = 1;
+    managed.exitSignal = null;
+    managed.error = error instanceof Error ? error.message : String(error);
+  });
+
+  return managed;
+}
+
+function isWorkerRuntimeStalled(
+  worker: SupervisorWorkerProcess,
+  snapshot: OrchestratorSupervisorWorkerSnapshot,
+  stallMs: number,
+  now = new Date(),
+) {
+  let deadline = worker.startedAt.getTime() + stallMs;
+  const heartbeatAt =
+    snapshot.heartbeatAt === null
+      ? Number.NaN
+      : Date.parse(snapshot.heartbeatAt);
+  if (Number.isFinite(heartbeatAt)) {
+    deadline = Math.max(deadline, heartbeatAt + stallMs);
+  }
+
+  if (snapshot.phase === "sleeping" && snapshot.waitingUntil) {
+    const waitingUntil = Date.parse(snapshot.waitingUntil);
+    if (Number.isFinite(waitingUntil)) {
+      deadline = Math.max(deadline, waitingUntil + stallMs);
+    }
+  }
+
+  return now.getTime() > deadline;
+}
+
+function didWorkerFinishAllTasks(
+  worker: SupervisorWorkerProcess,
+  snapshot: OrchestratorSupervisorWorkerSnapshot,
+) {
+  return (
+    worker.exited && worker.exitCode === 0 && snapshot.phase === "completed"
+  );
+}
+
+function formatSupervisorWorkerSummary(
+  snapshot: OrchestratorSupervisorWorkerSnapshot,
+) {
+  const parts = [
+    `source=${snapshot.source}`,
+    `phase=${snapshot.phase ?? "unknown"}`,
+    `task=${snapshot.activeTaskId ?? "none"}`,
+  ];
+  if (snapshot.heartbeatAt) {
+    parts.push(`heartbeatAt=${snapshot.heartbeatAt}`);
+  }
+  if (snapshot.waitingUntil) {
+    parts.push(`waitingUntil=${snapshot.waitingUntil}`);
+  }
+  return parts.join(", ");
 }
 
 function findTaskById(tasks: Task[], taskId: string): Task | null {
@@ -3778,6 +4427,409 @@ export function runOrchestratorCli(
 
   try {
     return runOrchestratorLoop(options, runtime);
+  } catch (caughtError) {
+    error(
+      caughtError instanceof Error ? caughtError.message : String(caughtError),
+    );
+    return 1;
+  }
+}
+
+async function runOrchestratorSupervisor(
+  options: OrchestratorSupervisorCliOptions,
+  runtime: OrchestratorSupervisorRuntimeOptions = {},
+): Promise<number> {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const error = runtime.error ?? ((message: string) => console.error(message));
+  const repoRoot = runtime.repoRoot ? resolve(runtime.repoRoot) : process.cwd();
+  const workflow = loadWorkflow(repoRoot, options.workflowFile);
+  const supervisorScriptPath = resolve(
+    runtime.scriptPath ??
+      process.argv[1] ??
+      "scripts/orchestrator-supervisor.ts",
+  );
+  const workerScriptPath = resolve(
+    dirname(supervisorScriptPath),
+    "orchestrator.ts",
+  );
+  const supervisorStartedAt = new Date();
+  const supervisorLockPath = acquireSupervisorLock(repoRoot, workflow);
+  const supervisorStatus = buildSupervisorStatus(
+    workflow,
+    options,
+    supervisorStartedAt,
+  );
+  const checkIntervalMs = options.checkIntervalSeconds * 1000;
+  const stallMs = options.stallSeconds * 1000;
+  const restartDelayMs = options.restartDelaySeconds * 1000;
+  let currentState: OrchestratorSupervisorState = "starting";
+  let worker: SupervisorWorkerProcess | null = null;
+  let workerSnapshot = buildEmptySupervisorWorkerSnapshot("missing");
+  let stopping = false;
+
+  const persistSupervisorStatus = () => {
+    supervisorStatus.state = currentState;
+    supervisorStatus.updatedAt = new Date().toISOString();
+    supervisorStatus.worker = {
+      pid:
+        worker && !worker.exited
+          ? (worker.child.pid ?? null)
+          : (workerSnapshot.pid ?? null),
+      startedAt:
+        worker && !worker.exited ? worker.startedAt.toISOString() : null,
+      source: workerSnapshot.source,
+      phase: workerSnapshot.phase,
+      activeTaskId: workerSnapshot.activeTaskId,
+      heartbeatAt: workerSnapshot.heartbeatAt,
+      waitingUntil: workerSnapshot.waitingUntil,
+      lastNote: workerSnapshot.lastNote,
+      lastError: workerSnapshot.lastError,
+    };
+    saveSupervisorStatus(repoRoot, workflow, supervisorStatus);
+  };
+
+  const restartWorker = async (reason: string) => {
+    if (restartDelayMs > 0) {
+      currentState = "restarting";
+      persistSupervisorStatus();
+      await sleepAsync(restartDelayMs, runtime.sleep);
+    }
+
+    if (stopping) {
+      return;
+    }
+
+    supervisorStatus.restartCount += 1;
+    supervisorStatus.lastRestartAt = new Date().toISOString();
+    supervisorStatus.lastRestartReason = reason;
+    worker = startSupervisorWorker(
+      repoRoot,
+      options.workflowFile,
+      workerScriptPath,
+    );
+    workerSnapshot = buildEmptySupervisorWorkerSnapshot("missing");
+    currentState = "running";
+    persistSupervisorStatus();
+    log(
+      `Restarted ${workflow.name} worker after ${reason} (pid ${worker.child.pid ?? "unknown"}).`,
+    );
+  };
+
+  const handleStopSignal = (signal: NodeJS.Signals) => {
+    if (stopping) {
+      return;
+    }
+
+    stopping = true;
+    currentState = "stopping";
+    workerSnapshot = readSupervisorWorkerSnapshot(
+      repoRoot,
+      workflow,
+      worker?.child.pid ?? null,
+    );
+    persistSupervisorStatus();
+    if (worker?.child.pid) {
+      sendSignalToProcessTree(worker.child.pid, signal);
+    }
+  };
+
+  const signalHandlers: Array<[NodeJS.Signals, () => void]> = [
+    ["SIGINT", () => handleStopSignal("SIGINT")],
+    ["SIGTERM", () => handleStopSignal("SIGTERM")],
+    ["SIGHUP", () => handleStopSignal("SIGHUP")],
+  ];
+
+  for (const [signal, handler] of signalHandlers) {
+    process.on(signal, handler);
+  }
+
+  try {
+    worker = startSupervisorWorker(
+      repoRoot,
+      options.workflowFile,
+      workerScriptPath,
+    );
+    currentState = "running";
+    persistSupervisorStatus();
+    log(
+      `Supervising ${workflow.name} (${workflow.workflowPath}). Worker pid ${worker.child.pid ?? "unknown"}.`,
+    );
+
+    while (!stopping) {
+      workerSnapshot = readSupervisorWorkerSnapshot(
+        repoRoot,
+        workflow,
+        worker?.child.pid ?? null,
+      );
+      persistSupervisorStatus();
+
+      if (worker && worker.exited) {
+        supervisorStatus.lastWorkerExitCode = worker.exitCode;
+        supervisorStatus.lastWorkerSignal = worker.exitSignal;
+        cleanupWorkerLock(repoRoot, workflow);
+        const finalSnapshot = readSupervisorWorkerSnapshot(repoRoot, workflow);
+        if (
+          finalSnapshot.source !== "missing" &&
+          finalSnapshot.source !== "invalid"
+        ) {
+          workerSnapshot = finalSnapshot;
+        }
+
+        if (didWorkerFinishAllTasks(worker, workerSnapshot)) {
+          currentState = "stopped";
+          persistSupervisorStatus();
+          log(`Worker completed all tracked tasks for ${workflow.name}.`);
+          return 0;
+        }
+
+        const reason = worker.error
+          ? `worker startup error: ${worker.error}`
+          : `worker exit ${worker.exitCode ?? worker.exitSignal ?? "unknown"}`;
+        await restartWorker(reason);
+        continue;
+      }
+
+      if (worker && isWorkerRuntimeStalled(worker, workerSnapshot, stallMs)) {
+        currentState = "restarting";
+        persistSupervisorStatus();
+        const stalledPid = worker.child.pid ?? null;
+        const reason = `runtime stall (${formatSupervisorWorkerSummary(workerSnapshot)})`;
+        await terminateProcessTree(stalledPid, runtime.sleep);
+        if (worker) {
+          worker.exited = true;
+          worker.exitSignal = worker.exitSignal ?? "SIGTERM";
+        }
+        cleanupWorkerLock(repoRoot, workflow);
+        supervisorStatus.lastWorkerExitCode = worker?.exitCode ?? null;
+        supervisorStatus.lastWorkerSignal = worker?.exitSignal ?? "SIGTERM";
+        await restartWorker(reason);
+        continue;
+      }
+
+      await sleepAsync(checkIntervalMs, runtime.sleep);
+    }
+
+    return 0;
+  } catch (caughtError) {
+    const message =
+      caughtError instanceof Error ? caughtError.message : String(caughtError);
+    currentState = "error";
+    workerSnapshot = readSupervisorWorkerSnapshot(
+      repoRoot,
+      workflow,
+      worker?.child.pid ?? null,
+    );
+    persistSupervisorStatus();
+    error(message);
+    return 1;
+  } finally {
+    for (const [signal, handler] of signalHandlers) {
+      process.off(signal, handler);
+    }
+    if (worker?.child.pid) {
+      await terminateProcessTree(worker.child.pid, runtime.sleep);
+      cleanupWorkerLock(repoRoot, workflow);
+    }
+    currentState = "stopped";
+    workerSnapshot = readSupervisorWorkerSnapshot(repoRoot, workflow);
+    persistSupervisorStatus();
+    releaseRuntimeLock(supervisorLockPath);
+  }
+}
+
+async function startOrchestratorSupervisor(
+  options: OrchestratorSupervisorCliOptions,
+  runtime: OrchestratorSupervisorRuntimeOptions = {},
+): Promise<number> {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const repoRoot = runtime.repoRoot ? resolve(runtime.repoRoot) : process.cwd();
+  const workflow = loadWorkflow(repoRoot, options.workflowFile);
+  const supervisorScriptPath = resolve(
+    runtime.scriptPath ??
+      process.argv[1] ??
+      "scripts/orchestrator-supervisor.ts",
+  );
+  const supervisorStatusPath = getSupervisorStatusPath(repoRoot, workflow);
+
+  assertSupervisorCanStart(repoRoot, workflow);
+
+  const child = spawn(
+    process.execPath,
+    [
+      supervisorScriptPath,
+      "run",
+      "--workflow",
+      options.workflowFile,
+      "--stall-seconds",
+      String(options.stallSeconds),
+      "--check-interval-seconds",
+      String(options.checkIntervalSeconds),
+      "--restart-delay-seconds",
+      String(options.restartDelaySeconds),
+    ],
+    {
+      cwd: repoRoot,
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    },
+  );
+  child.unref();
+
+  const startDeadline = Date.now() + 5000;
+  while (Date.now() < startDeadline) {
+    if (child.pid && !isProcessAlive(child.pid)) {
+      throw new Error(
+        `Supervisor for ${workflow.name} exited before it wrote ${relative(repoRoot, supervisorStatusPath) || supervisorStatusPath}.`,
+      );
+    }
+
+    const status = loadSupervisorStatus(repoRoot, workflow);
+    if (status?.pid === child.pid) {
+      log(
+        `Started supervisor for ${workflow.name} (pid ${child.pid}). Status file: ${relative(repoRoot, supervisorStatusPath) || supervisorStatusPath}.`,
+      );
+      return 0;
+    }
+
+    await sleepAsync(100, runtime.sleep);
+  }
+
+  log(
+    `Started supervisor for ${workflow.name} (pid ${child.pid ?? "unknown"}). Status file: ${relative(repoRoot, supervisorStatusPath) || supervisorStatusPath}.`,
+  );
+  return 0;
+}
+
+async function stopOrchestratorSupervisor(
+  options: OrchestratorSupervisorCliOptions,
+  runtime: OrchestratorSupervisorRuntimeOptions = {},
+): Promise<number> {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const repoRoot = runtime.repoRoot ? resolve(runtime.repoRoot) : process.cwd();
+  const workflow = loadWorkflow(repoRoot, options.workflowFile);
+  const lockPath = getSupervisorLockPath(repoRoot, workflow);
+  const owner = readLockOwner(lockPath);
+  const pid =
+    owner?.pid ?? loadSupervisorStatus(repoRoot, workflow)?.pid ?? null;
+
+  if (tryRemoveStaleLock(lockPath)) {
+    log(`Removed a stale supervisor lock for ${workflow.name}.`);
+    return 0;
+  }
+
+  if (!pid || !isProcessAlive(pid)) {
+    log(`Supervisor for ${workflow.name} is not running.`);
+    return 0;
+  }
+
+  sendSignalToProcessTree(pid, "SIGTERM");
+  if (!(await waitForProcessExit(pid, 10_000, runtime.sleep))) {
+    sendSignalToProcessTree(pid, "SIGKILL");
+    await waitForProcessExit(pid, 2_000, runtime.sleep);
+  }
+  tryRemoveStaleLock(lockPath);
+  log(`Stopped supervisor for ${workflow.name}.`);
+  return 0;
+}
+
+function formatTimestampSummary(value: string | null | undefined): string {
+  return value ? value : "none";
+}
+
+function formatSupervisorStatusReport(
+  repoRoot: string,
+  workflow: WorkflowConfig,
+): string {
+  const lockPath = getSupervisorLockPath(repoRoot, workflow);
+  const owner = readLockOwner(lockPath);
+  const supervisorRunning =
+    owner?.pid !== null &&
+    owner?.pid !== undefined &&
+    isProcessAlive(owner.pid);
+  const supervisorStatus = loadSupervisorStatus(repoRoot, workflow);
+  const workerSnapshot = readSupervisorWorkerSnapshot(repoRoot, workflow);
+  const supervisorStatusPath = relative(
+    repoRoot,
+    getSupervisorStatusPath(repoRoot, workflow),
+  );
+  const workerStatusPath = relative(
+    repoRoot,
+    getRuntimeStatusPath(repoRoot, workflow),
+  );
+  const workerHeartbeatPath = relative(
+    repoRoot,
+    getRuntimeHeartbeatPath(repoRoot, workflow),
+  );
+
+  return [
+    `Supervisor: ${supervisorRunning ? "running" : "not running"}`,
+    `Workflow: ${workflow.name} (${workflow.workflowPath})`,
+    `Supervisor PID: ${
+      supervisorRunning ? owner?.pid : (supervisorStatus?.pid ?? "none")
+    }`,
+    `Supervisor state: ${supervisorStatus?.state ?? "unknown"}`,
+    `Restarts: ${supervisorStatus?.restartCount ?? 0}`,
+    `Last restart: ${supervisorStatus?.lastRestartReason ?? "none"}`,
+    `Worker PID: ${workerSnapshot.pid ?? supervisorStatus?.worker.pid ?? "none"}`,
+    `Worker phase: ${workerSnapshot.phase ?? supervisorStatus?.worker.phase ?? "unknown"}`,
+    `Worker task: ${
+      workerSnapshot.activeTaskId ??
+      supervisorStatus?.worker.activeTaskId ??
+      "none"
+    }`,
+    `Worker heartbeat: ${formatTimestampSummary(workerSnapshot.heartbeatAt ?? supervisorStatus?.worker.heartbeatAt)}`,
+    `Worker waitingUntil: ${formatTimestampSummary(workerSnapshot.waitingUntil ?? supervisorStatus?.worker.waitingUntil)}`,
+    `Worker last note: ${workerSnapshot.lastNote ?? supervisorStatus?.worker.lastNote ?? "none"}`,
+    `Worker last error: ${workerSnapshot.lastError ?? supervisorStatus?.worker.lastError ?? "none"}`,
+    `Supervisor status file: ${supervisorStatusPath || getSupervisorStatusPath(repoRoot, workflow)}`,
+    `Worker status file: ${workerStatusPath || getRuntimeStatusPath(repoRoot, workflow)}`,
+    `Worker heartbeat file: ${workerHeartbeatPath || getRuntimeHeartbeatPath(repoRoot, workflow)}`,
+  ].join("\n");
+}
+
+export async function runOrchestratorSupervisorCli(
+  argv: string[],
+  runtime: OrchestratorSupervisorRuntimeOptions = {},
+): Promise<number> {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const error = runtime.error ?? ((message: string) => console.error(message));
+
+  let options: OrchestratorSupervisorCliOptions;
+  try {
+    options = parseOrchestratorSupervisorCliArgs(argv);
+  } catch (caughtError) {
+    error(
+      caughtError instanceof Error ? caughtError.message : String(caughtError),
+    );
+    error(formatOrchestratorSupervisorCliUsage());
+    return 1;
+  }
+
+  if (options.help) {
+    log(formatOrchestratorSupervisorCliUsage());
+    return 0;
+  }
+
+  try {
+    if (options.command === "start") {
+      return await startOrchestratorSupervisor(options, runtime);
+    }
+
+    if (options.command === "stop") {
+      return await stopOrchestratorSupervisor(options, runtime);
+    }
+
+    if (options.command === "status") {
+      const repoRoot = runtime.repoRoot
+        ? resolve(runtime.repoRoot)
+        : process.cwd();
+      const workflow = loadWorkflow(repoRoot, options.workflowFile);
+      log(formatSupervisorStatusReport(repoRoot, workflow));
+      return 0;
+    }
+
+    return await runOrchestratorSupervisor(options, runtime);
   } catch (caughtError) {
     error(
       caughtError instanceof Error ? caughtError.message : String(caughtError),
