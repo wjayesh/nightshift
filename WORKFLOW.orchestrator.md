@@ -5,9 +5,9 @@ task_sources:
 instruction_files:
   - docs/standalone-orchestrator-prd.md
   - docs/autonomous-orchestrator.md
-progress_file: .mahilo-orchestrator/orchestrator-progress.md
-state_file: .mahilo-orchestrator/orchestrator-state.json
-workspace_root: .mahilo-orchestrator/orchestrator-workspaces
+progress_file: .orchestrator/orchestrator-progress.md
+state_file: .orchestrator/orchestrator-state.json
+workspace_root: .orchestrator/orchestrator-workspaces
 workspace_mode: shared
 agent_command: codex
 agent_args:
@@ -19,6 +19,7 @@ completion_phrase: COMPLETE
 auto_commit_on_done: true
 auto_push_every_commits: 3
 ---
+
 # Standalone Orchestrator Workflow
 
 You are building a lean, reusable autonomous coding orchestrator repo.

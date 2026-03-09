@@ -1,5 +1,13 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { mergeTaskUniverses, parseTaskFile, parseWorkflowFile, selectNextTask } from "../../src/orchestrator";
+import {
+  buildTaskPrompt,
+  getRuntimeRoot,
+  mergeTaskUniverses,
+  parseTaskFile,
+  parseWorkflowFile,
+  selectNextTask,
+} from "../../src/orchestrator";
 
 describe("parseWorkflowFile", () => {
   it("parses front matter arrays and scalars", () => {
@@ -29,6 +37,39 @@ required_branch: autonomous/server-integration
     expect(workflow.autoPushEveryCommits).toBe(5);
     expect(workflow.requiredBranch).toBe("autonomous/server-integration");
     expect(workflow.workflowBody).toContain("Body here");
+  });
+
+  it("falls back to standalone defaults when fields are omitted", () => {
+    const workflow = parseWorkflowFile(
+      "# Workflow\nUse the default standalone layout.\n",
+    );
+
+    expect(workflow.name).toBe("autonomous-development");
+    expect(workflow.taskSources).toEqual(["docs/tasks.md"]);
+    expect(workflow.dependencySources).toEqual([]);
+    expect(workflow.instructionFiles).toEqual([]);
+    expect(workflow.progressFile).toBe(".orchestrator/progress.md");
+    expect(workflow.stateFile).toBe(".orchestrator/state.json");
+    expect(workflow.workspaceRoot).toBe(".orchestrator/workspaces");
+    expect(workflow.agentArgs).toEqual(["exec"]);
+  });
+
+  it("accepts single-path workflow fields without list syntax", () => {
+    const workflow = parseWorkflowFile(`---
+task_sources: docs/tasks.md
+dependency_sources: docs/dependencies.md
+instruction_files: docs/instructions.md
+agent_args: --json
+state_file: runtime/state.json
+---
+# Workflow
+`);
+
+    expect(workflow.taskSources).toEqual(["docs/tasks.md"]);
+    expect(workflow.dependencySources).toEqual(["docs/dependencies.md"]);
+    expect(workflow.instructionFiles).toEqual(["docs/instructions.md"]);
+    expect(workflow.agentArgs).toEqual(["--json"]);
+    expect(getRuntimeRoot("/repo", workflow)).toBe(join("/repo", "runtime"));
   });
 });
 
@@ -82,9 +123,29 @@ describe("task parsing and selection", () => {
   });
 
   it("uses dependency sources to unlock cross-doc tasks", () => {
-    const pluginTasks = parseTaskFile(`### Plugin Task\n- **ID**: \`PLG-001\`\n- **Status**: \`pending\`\n- **Priority**: P0\n- **Depends on**: SRV-001\n`, "docs/plugin.md");
-    const serverTasks = parseTaskFile(`### Server Task\n- **ID**: \`SRV-001\`\n- **Status**: \`done\`\n- **Priority**: P0\n- **Depends on**: None\n`, "docs/server.md");
+    const pluginTasks = parseTaskFile(
+      `### Plugin Task\n- **ID**: \`PLG-001\`\n- **Status**: \`pending\`\n- **Priority**: P0\n- **Depends on**: SRV-001\n`,
+      "docs/plugin.md",
+    );
+    const serverTasks = parseTaskFile(
+      `### Server Task\n- **ID**: \`SRV-001\`\n- **Status**: \`done\`\n- **Priority**: P0\n- **Depends on**: None\n`,
+      "docs/server.md",
+    );
     const universe = mergeTaskUniverses(pluginTasks, serverTasks);
     expect(selectNextTask(pluginTasks, null, universe)?.id).toBe("PLG-001");
+  });
+
+  it("renders a prompt without requiring instruction files", () => {
+    const [task] = parseTaskFile(
+      `## Extract Core\n- **ID**: \`ORCH-010\`\n- **Status**: \`pending\`\n- **Priority**: P0\n- **Depends on**: None\n`,
+      "docs/tasks.md",
+    );
+    const workflow = parseWorkflowFile(
+      "# Workflow\nExtract the standalone core.\n",
+    );
+    const prompt = buildTaskPrompt(workflow, task, "/repo");
+
+    expect(prompt).toContain("Instruction files to read first:\n- None");
+    expect(prompt).toContain("Task ID: ORCH-010");
   });
 });

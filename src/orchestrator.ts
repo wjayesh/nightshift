@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-export type TaskStatus = "pending" | "in-progress" | "blocked" | "review" | "done";
+export type TaskStatus =
+  | "pending"
+  | "in-progress"
+  | "blocked"
+  | "review"
+  | "done";
 
 export type TaskPriority = `P${number}` | "unscored";
 
@@ -58,33 +63,46 @@ export type OrchestratorState = {
     iteration: number;
     taskId: string | null;
     timestamp: string;
-    status: "started" | "continued" | "completed" | "blocked" | "idle" | "agent_error";
+    status:
+      | "started"
+      | "continued"
+      | "completed"
+      | "blocked"
+      | "idle"
+      | "agent_error";
     note: string;
   }>;
 };
 
 type FrontMatterValue = string | number | string[];
 
-const DEFAULT_WORKFLOW: Omit<WorkflowConfig, "workflowBody" | "workflowPath"> = {
-  name: "mahilo-autonomous-development",
-  taskSources: ["docs/prd-server-policy-platform.md", "docs/prd-openclaw-plugin-migration.md"],
-  dependencySources: [],
-  instructionFiles: ["CLAUDE.md", "docs/openclaw-plugin-server-contract.md"],
-  progressFile: ".mahilo-orchestrator/progress.md",
-  stateFile: ".mahilo-orchestrator/state.json",
-  workspaceRoot: ".mahilo-orchestrator/workspaces",
-  workspaceMode: "git_worktree",
-  agentCommand: "codex",
-  agentArgs: ["exec"],
-  maxIterations: 50,
-  pollIntervalSeconds: 3,
-  completionPhrase: "COMPLETE",
-  requiredBranch: null,
-  autoCommitOnDone: true,
-  autoPushEveryCommits: 3,
-};
+const DEFAULT_WORKFLOW: Omit<WorkflowConfig, "workflowBody" | "workflowPath"> =
+  {
+    name: "autonomous-development",
+    taskSources: ["docs/tasks.md"],
+    dependencySources: [],
+    instructionFiles: [],
+    progressFile: ".orchestrator/progress.md",
+    stateFile: ".orchestrator/state.json",
+    workspaceRoot: ".orchestrator/workspaces",
+    workspaceMode: "git_worktree",
+    agentCommand: "codex",
+    agentArgs: ["exec"],
+    maxIterations: 50,
+    pollIntervalSeconds: 3,
+    completionPhrase: "COMPLETE",
+    requiredBranch: null,
+    autoCommitOnDone: true,
+    autoPushEveryCommits: 3,
+  };
 
-const STATUS_VALUES = new Set<TaskStatus>(["pending", "in-progress", "blocked", "review", "done"]);
+const STATUS_VALUES = new Set<TaskStatus>([
+  "pending",
+  "in-progress",
+  "blocked",
+  "review",
+  "done",
+]);
 
 function parseScalarValue(value: string): string | number {
   const trimmed = value.trim();
@@ -100,6 +118,21 @@ function parseScalarValue(value: string): string | number {
   return trimmed;
 }
 
+function parseStringList(
+  value: FrontMatterValue | undefined,
+  fallback: string[],
+): string[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    return [value];
+  }
+
+  return fallback;
+}
+
 export function runGit(args: string[], cwd: string) {
   return spawnSync("git", args, { cwd, encoding: "utf8" });
 }
@@ -108,7 +141,10 @@ function gitError(result: ReturnType<typeof runGit>, fallback: string): string {
   return result.stderr?.trim() || result.stdout?.trim() || fallback;
 }
 
-export function parseWorkflowFile(content: string, workflowPath = "WORKFLOW.md"): WorkflowConfig {
+export function parseWorkflowFile(
+  content: string,
+  workflowPath = "WORKFLOW.md",
+): WorkflowConfig {
   let frontMatter: Record<string, FrontMatterValue> = {};
   let workflowBody = content.trim();
 
@@ -134,7 +170,9 @@ export function parseWorkflowFile(content: string, workflowPath = "WORKFLOW.md")
       const listItemMatch = line.match(/^\s+-\s+(.*)$/);
       if (listItemMatch) {
         if (!currentKey) {
-          throw new Error(`Found a list item before a key in ${workflowPath}: ${line}`);
+          throw new Error(
+            `Found a list item before a key in ${workflowPath}: ${line}`,
+          );
         }
         const current = frontMatter[currentKey];
         if (!Array.isArray(current)) {
@@ -148,26 +186,37 @@ export function parseWorkflowFile(content: string, workflowPath = "WORKFLOW.md")
 
       const keyMatch = line.match(/^([A-Za-z0-9_]+):(?:\s+(.*))?$/);
       if (!keyMatch) {
-        throw new Error(`Unsupported front matter syntax in ${workflowPath}: ${line}`);
+        throw new Error(
+          `Unsupported front matter syntax in ${workflowPath}: ${line}`,
+        );
       }
 
       const [, key, rawValue] = keyMatch;
       currentKey = key;
-      frontMatter[key] = rawValue === undefined || rawValue === "" ? [] : parseScalarValue(rawValue);
+      frontMatter[key] =
+        rawValue === undefined || rawValue === ""
+          ? []
+          : parseScalarValue(rawValue);
     }
   }
 
   return {
-    name: typeof frontMatter.name === "string" ? frontMatter.name : DEFAULT_WORKFLOW.name,
-    taskSources: Array.isArray(frontMatter.task_sources)
-      ? frontMatter.task_sources
-      : DEFAULT_WORKFLOW.taskSources,
-    dependencySources: Array.isArray(frontMatter.dependency_sources)
-      ? frontMatter.dependency_sources
-      : DEFAULT_WORKFLOW.dependencySources,
-    instructionFiles: Array.isArray(frontMatter.instruction_files)
-      ? frontMatter.instruction_files
-      : DEFAULT_WORKFLOW.instructionFiles,
+    name:
+      typeof frontMatter.name === "string"
+        ? frontMatter.name
+        : DEFAULT_WORKFLOW.name,
+    taskSources: parseStringList(
+      frontMatter.task_sources,
+      DEFAULT_WORKFLOW.taskSources,
+    ),
+    dependencySources: parseStringList(
+      frontMatter.dependency_sources,
+      DEFAULT_WORKFLOW.dependencySources,
+    ),
+    instructionFiles: parseStringList(
+      frontMatter.instruction_files,
+      DEFAULT_WORKFLOW.instructionFiles,
+    ),
     progressFile:
       typeof frontMatter.progress_file === "string"
         ? frontMatter.progress_file
@@ -181,16 +230,18 @@ export function parseWorkflowFile(content: string, workflowPath = "WORKFLOW.md")
         ? frontMatter.workspace_root
         : DEFAULT_WORKFLOW.workspaceRoot,
     workspaceMode:
-      frontMatter.workspace_mode === "shared" || frontMatter.workspace_mode === "git_worktree"
+      frontMatter.workspace_mode === "shared" ||
+      frontMatter.workspace_mode === "git_worktree"
         ? frontMatter.workspace_mode
         : DEFAULT_WORKFLOW.workspaceMode,
     agentCommand:
       typeof frontMatter.agent_command === "string"
         ? frontMatter.agent_command
         : DEFAULT_WORKFLOW.agentCommand,
-    agentArgs: Array.isArray(frontMatter.agent_args)
-      ? frontMatter.agent_args
-      : DEFAULT_WORKFLOW.agentArgs,
+    agentArgs: parseStringList(
+      frontMatter.agent_args,
+      DEFAULT_WORKFLOW.agentArgs,
+    ),
     maxIterations:
       typeof frontMatter.max_iterations === "number"
         ? frontMatter.max_iterations
@@ -221,7 +272,9 @@ export function parseWorkflowFile(content: string, workflowPath = "WORKFLOW.md")
 }
 
 function normalizeStatus(rawStatus: string | null): TaskStatus {
-  const normalized = (rawStatus ?? "pending").trim().toLowerCase() as TaskStatus;
+  const normalized = (rawStatus ?? "pending")
+    .trim()
+    .toLowerCase() as TaskStatus;
   return STATUS_VALUES.has(normalized) ? normalized : "pending";
 }
 
@@ -250,7 +303,11 @@ function parseDependsOn(rawDependsOn: string | null): string[] {
 export function parseTaskFile(content: string, filePath: string): Task[] {
   const lines = content.split(/\r?\n/);
   const tasks: Task[] = [];
-  let currentHeading: { title: string; level: number; lineIndex: number } | null = null;
+  let currentHeading: {
+    title: string;
+    level: number;
+    lineIndex: number;
+  } | null = null;
 
   const flushTask = (endIndex: number) => {
     if (!currentHeading) {
@@ -262,9 +319,15 @@ export function parseTaskFile(content: string, filePath: string): Task[] {
     const idMatch = sectionBody.match(/-\s+\*\*ID\*\*:\s+`([^`]+)`/);
 
     if (idMatch) {
-      const statusMatch = sectionBody.match(/-\s+\*\*Status\*\*:\s+`?([^`\n]+)`?/);
-      const priorityMatch = sectionBody.match(/-\s+\*\*Priority\*\*:\s+`?([^`\n]+)`?/);
-      const dependsOnMatch = sectionBody.match(/-\s+\*\*Depends on\*\*:\s+([^\n]+)/);
+      const statusMatch = sectionBody.match(
+        /-\s+\*\*Status\*\*:\s+`?([^`\n]+)`?/,
+      );
+      const priorityMatch = sectionBody.match(
+        /-\s+\*\*Priority\*\*:\s+`?([^`\n]+)`?/,
+      );
+      const dependsOnMatch = sectionBody.match(
+        /-\s+\*\*Depends on\*\*:\s+([^\n]+)/,
+      );
 
       tasks.push({
         id: idMatch[1].trim(),
@@ -285,7 +348,7 @@ export function parseTaskFile(content: string, filePath: string): Task[] {
   };
 
   lines.forEach((line, index) => {
-    const headingMatch = line.match(/^(#{3,4})\s+(.+)$/);
+    const headingMatch = line.match(/^(#{2,6})\s+(.+)$/);
     if (!headingMatch) {
       return;
     }
@@ -302,8 +365,20 @@ export function parseTaskFile(content: string, filePath: string): Task[] {
   return tasks;
 }
 
-export function resolvePath(repoRoot: string, maybeRelativePath: string): string {
-  return isAbsolute(maybeRelativePath) ? maybeRelativePath : resolve(repoRoot, maybeRelativePath);
+export function resolvePath(
+  repoRoot: string,
+  maybeRelativePath: string,
+): string {
+  return isAbsolute(maybeRelativePath)
+    ? maybeRelativePath
+    : resolve(repoRoot, maybeRelativePath);
+}
+
+export function getRuntimeRoot(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+): string {
+  return dirname(resolvePath(repoRoot, config.stateFile));
 }
 
 export function loadTasks(repoRoot: string, taskSources: string[]): Task[] {
@@ -341,7 +416,9 @@ function priorityRank(priority: TaskPriority): number {
 }
 
 function isReady(task: Task, taskMap: Map<string, Task>): boolean {
-  return task.dependsOn.every((dependencyId) => taskMap.get(dependencyId)?.status === "done");
+  return task.dependsOn.every(
+    (dependencyId) => taskMap.get(dependencyId)?.status === "done",
+  );
 }
 
 export function selectNextTask(
@@ -363,10 +440,15 @@ export function selectNextTask(
     return inProgressTask;
   }
 
-  const readyTasks = tasks.filter((task) => task.status === "pending" && isReady(task, taskMap));
+  const readyTasks = tasks.filter(
+    (task) => task.status === "pending" && isReady(task, taskMap),
+  );
   readyTasks.sort((left, right) => {
-    const priorityDifference = priorityRank(left.priority) - priorityRank(right.priority);
-    return priorityDifference !== 0 ? priorityDifference : left.sortIndex - right.sortIndex;
+    const priorityDifference =
+      priorityRank(left.priority) - priorityRank(right.priority);
+    return priorityDifference !== 0
+      ? priorityDifference
+      : left.sortIndex - right.sortIndex;
   });
 
   return readyTasks[0] ?? null;
@@ -376,17 +458,26 @@ export function areAllTasksComplete(tasks: Task[]): boolean {
   return tasks.length > 0 && tasks.every((task) => task.status === "done");
 }
 
-export function loadWorkflow(repoRoot: string, workflowFile = "WORKFLOW.md"): WorkflowConfig {
+export function loadWorkflow(
+  repoRoot: string,
+  workflowFile = "WORKFLOW.md",
+): WorkflowConfig {
   const workflowPath = resolvePath(repoRoot, workflowFile);
   const content = readFileSync(workflowPath, "utf8");
-  return parseWorkflowFile(content, relative(repoRoot, workflowPath) || workflowFile);
+  return parseWorkflowFile(
+    content,
+    relative(repoRoot, workflowPath) || workflowFile,
+  );
 }
 
 export function ensureDirectory(path: string) {
   mkdirSync(path, { recursive: true });
 }
 
-export function loadState(repoRoot: string, config: WorkflowConfig): OrchestratorState {
+export function loadState(
+  repoRoot: string,
+  config: WorkflowConfig,
+): OrchestratorState {
   const statePath = resolvePath(repoRoot, config.stateFile);
   if (!existsSync(statePath)) {
     ensureDirectory(dirname(statePath));
@@ -403,7 +494,9 @@ export function loadState(repoRoot: string, config: WorkflowConfig): Orchestrato
     return initialState;
   }
 
-  const state = JSON.parse(readFileSync(statePath, "utf8")) as OrchestratorState;
+  const state = JSON.parse(
+    readFileSync(statePath, "utf8"),
+  ) as OrchestratorState;
   return {
     workflowPath: state.workflowPath ?? config.workflowPath,
     iteration: state.iteration ?? 0,
@@ -415,13 +508,21 @@ export function loadState(repoRoot: string, config: WorkflowConfig): Orchestrato
   };
 }
 
-export function saveState(repoRoot: string, config: WorkflowConfig, state: OrchestratorState) {
+export function saveState(
+  repoRoot: string,
+  config: WorkflowConfig,
+  state: OrchestratorState,
+) {
   const statePath = resolvePath(repoRoot, config.stateFile);
   ensureDirectory(dirname(statePath));
   writeFileSync(statePath, JSON.stringify(state, null, 2) + "\n");
 }
 
-export function appendProgress(repoRoot: string, config: WorkflowConfig, lines: string[]) {
+export function appendProgress(
+  repoRoot: string,
+  config: WorkflowConfig,
+  lines: string[],
+) {
   const progressPath = resolvePath(repoRoot, config.progressFile);
   ensureDirectory(dirname(progressPath));
   const existing = existsSync(progressPath)
@@ -448,16 +549,31 @@ function sanitizePathSegment(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
 }
 
-export function previewWorkspacePath(repoRoot: string, config: WorkflowConfig, task: Task): string {
+export function previewWorkspacePath(
+  repoRoot: string,
+  config: WorkflowConfig,
+  task: Task,
+): string {
   if (config.workspaceMode === "shared") {
     return repoRoot;
   }
-  return join(resolvePath(repoRoot, config.workspaceRoot), sanitizePathSegment(task.id));
+  return join(
+    resolvePath(repoRoot, config.workspaceRoot),
+    sanitizePathSegment(task.id),
+  );
 }
 
-export function ensureWorkspace(repoRoot: string, config: WorkflowConfig, task: Task): WorkspaceHandle {
+export function ensureWorkspace(
+  repoRoot: string,
+  config: WorkflowConfig,
+  task: Task,
+): WorkspaceHandle {
   if (config.workspaceMode === "shared") {
-    return { path: repoRoot, kind: "shared", branchName: getCurrentBranch(repoRoot) };
+    return {
+      path: repoRoot,
+      kind: "shared",
+      branchName: getCurrentBranch(repoRoot),
+    };
   }
 
   const workspacePath = previewWorkspacePath(repoRoot, config, task);
@@ -466,18 +582,31 @@ export function ensureWorkspace(repoRoot: string, config: WorkflowConfig, task: 
 
   if (!existsSync(workspacePath)) {
     const baseRef = config.requiredBranch ?? "HEAD";
-    const result = runGit(["worktree", "add", "-B", branchName, workspacePath, baseRef], repoRoot);
+    const result = runGit(
+      ["worktree", "add", "-B", branchName, workspacePath, baseRef],
+      repoRoot,
+    );
     if (result.status !== 0) {
-      throw new Error(`Failed to create git worktree for ${task.id}: ${gitError(result, "git worktree add failed")}`);
+      throw new Error(
+        `Failed to create git worktree for ${task.id}: ${gitError(result, "git worktree add failed")}`,
+      );
     }
   }
 
   return { path: workspacePath, kind: "git_worktree", branchName };
 }
 
-export function buildTaskPrompt(config: WorkflowConfig, task: Task, workspacePath: string): string {
-  const instructionList = config.instructionFiles.map((file) => `- ${file}`).join("\n");
-  const workspaceNote = workspacePath === process.cwd() ? "shared repo workspace" : workspacePath;
+export function buildTaskPrompt(
+  config: WorkflowConfig,
+  task: Task,
+  workspacePath: string,
+): string {
+  const instructionList =
+    config.instructionFiles.length > 0
+      ? config.instructionFiles.map((file) => `- ${file}`).join("\n")
+      : "- None";
+  const workspaceNote =
+    workspacePath === process.cwd() ? "shared repo workspace" : workspacePath;
 
   return [
     `Workflow: ${config.name}`,
@@ -560,7 +689,10 @@ export function listUniqueCommits(repoPath: string, baseRef: string): string[] {
     return [];
   }
 
-  const revListResult = runGit(["rev-list", "--reverse", `${baseRef}..HEAD`], repoPath);
+  const revListResult = runGit(
+    ["rev-list", "--reverse", `${baseRef}..HEAD`],
+    repoPath,
+  );
   if (revListResult.status !== 0) {
     throw new Error(
       `Failed to list task branch commits: ${gitError(revListResult, "git rev-list failed")}`,
@@ -573,15 +705,26 @@ export function listUniqueCommits(repoPath: string, baseRef: string): string[] {
     .filter((commit) => unapplied.has(commit));
 }
 
-export function commitPendingChanges(repoPath: string, message: string): RepoCommitResult {
+export function commitPendingChanges(
+  repoPath: string,
+  message: string,
+): RepoCommitResult {
   const addResult = runGit(["add", "-A"], repoPath);
   if (addResult.status !== 0) {
-    return { committed: false, commitSha: null, error: gitError(addResult, "git add failed") };
+    return {
+      committed: false,
+      commitSha: null,
+      error: gitError(addResult, "git add failed"),
+    };
   }
 
   const statusResult = runGit(["status", "--porcelain"], repoPath);
   if (statusResult.status !== 0) {
-    return { committed: false, commitSha: null, error: gitError(statusResult, "git status failed") };
+    return {
+      committed: false,
+      commitSha: null,
+      error: gitError(statusResult, "git status failed"),
+    };
   }
 
   if (!statusResult.stdout.trim()) {
@@ -590,7 +733,11 @@ export function commitPendingChanges(repoPath: string, message: string): RepoCom
 
   const commitResult = runGit(["commit", "-m", message], repoPath);
   if (commitResult.status !== 0) {
-    return { committed: false, commitSha: null, error: gitError(commitResult, "git commit failed") };
+    return {
+      committed: false,
+      commitSha: null,
+      error: gitError(commitResult, "git commit failed"),
+    };
   }
 
   return {
@@ -600,7 +747,10 @@ export function commitPendingChanges(repoPath: string, message: string): RepoCom
   };
 }
 
-export function cherryPickCommits(repoRoot: string, commits: string[]): CherryPickResult {
+export function cherryPickCommits(
+  repoRoot: string,
+  commits: string[],
+): CherryPickResult {
   if (commits.length === 0) {
     return { applied: false, commitCount: 0, lastCommitSha: null, error: null };
   }
@@ -616,7 +766,10 @@ export function cherryPickCommits(repoRoot: string, commits: string[]): CherryPi
         applied: appliedCount > 0,
         commitCount: appliedCount,
         lastCommitSha,
-        error: gitError(cherryPickResult, `git cherry-pick failed for ${commit}`),
+        error: gitError(
+          cherryPickResult,
+          `git cherry-pick failed for ${commit}`,
+        ),
       };
     }
 
@@ -635,7 +788,10 @@ export function cherryPickCommits(repoRoot: string, commits: string[]): CherryPi
 export function pushBranch(repoRoot: string, branch: string): RepoPushResult {
   const pushResult = runGit(["push", "origin", branch], repoRoot);
   if (pushResult.status !== 0) {
-    return { pushed: false, error: gitError(pushResult, `git push failed for ${branch}`) };
+    return {
+      pushed: false,
+      error: gitError(pushResult, `git push failed for ${branch}`),
+    };
   }
 
   return { pushed: true, error: null };
@@ -648,10 +804,20 @@ export function runAgentForTask(
   workspacePath: string,
   prompt: string,
 ): AgentRunResult {
-  const stateRoot = dirname(resolvePath(repoRoot, config.stateFile));
-  ensureDirectory(stateRoot);
-  const lastMessagePath = join(stateRoot, `${sanitizePathSegment(task.id)}-last-message.txt`);
-  const args = [...config.agentArgs, "-C", workspacePath, "-o", lastMessagePath, "-"];
+  const runtimeRoot = getRuntimeRoot(repoRoot, config);
+  ensureDirectory(runtimeRoot);
+  const lastMessagePath = join(
+    runtimeRoot,
+    `${sanitizePathSegment(task.id)}-last-message.txt`,
+  );
+  const args = [
+    ...config.agentArgs,
+    "-C",
+    workspacePath,
+    "-o",
+    lastMessagePath,
+    "-",
+  ];
 
   const child = spawnSync(config.agentCommand, args, {
     cwd: repoRoot,
@@ -660,15 +826,17 @@ export function runAgentForTask(
     encoding: "utf8",
     env: {
       ...process.env,
-      MAHILO_TASK_ID: task.id,
-      MAHILO_TASK_FILE: task.filePath,
-      MAHILO_WORKFLOW: config.name,
+      ORCHESTRATOR_TASK_ID: task.id,
+      ORCHESTRATOR_TASK_FILE: task.filePath,
+      ORCHESTRATOR_WORKFLOW: config.name,
     },
   });
 
   return {
     exitCode: child.status ?? 1,
-    lastMessage: existsSync(lastMessagePath) ? readFileSync(lastMessagePath, "utf8") : "",
+    lastMessage: existsSync(lastMessagePath)
+      ? readFileSync(lastMessagePath, "utf8")
+      : "",
     commandLine: [config.agentCommand, ...args].join(" "),
   };
 }

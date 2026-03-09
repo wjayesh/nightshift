@@ -56,18 +56,22 @@ Choose the minimal file and folder layout for the standalone repo.
 ### 1.1 Extract orchestrator core
 
 - **ID**: `ORCH-010`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-002
+- **Notes**:
+  - 2026-03-09: Started extracting standalone core defaults and removing hard-coded Mahilo runtime assumptions from the shared orchestrator engine.
+  - 2026-03-09: Switched the core default workflow layout to `docs/tasks.md` plus `.orchestrator/`, widened task heading parsing for reusable markdown docs, and routed runtime locks/last-message artifacts through the configured runtime root instead of hard-coded Mahilo paths.
+  - 2026-03-09: Validation passed with `bun test tests/unit/orchestrator.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts scripts/orchestrator.ts tests/unit/orchestrator.test.ts docs/tasks-standalone-orchestrator.md WORKFLOW.orchestrator.md`.
 
 Move the generic orchestration logic into a standalone repo layout with minimal Mahilo-specific coupling.
 
 **Acceptance Criteria**
 
-- [ ] Core workflow parsing exists
-- [ ] Core task parsing exists
-- [ ] Scheduler logic is standalone
-- [ ] Mahilo-specific assumptions are removed or isolated
+- [x] Core workflow parsing exists
+- [x] Core task parsing exists
+- [x] Scheduler logic is standalone
+- [x] Mahilo-specific assumptions are removed or isolated
 
 ### 1.2 Extract CLI entrypoint
 

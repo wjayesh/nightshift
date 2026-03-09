@@ -1,5 +1,12 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import {
   appendProgress,
@@ -10,6 +17,7 @@ import {
   ensureWorkspace,
   formatHistoryNote,
   getCurrentBranch,
+  getRuntimeRoot,
   listUniqueCommits,
   loadState,
   loadTasks,
@@ -21,6 +29,7 @@ import {
   saveState,
   selectNextTask,
   type Task,
+  type WorkflowConfig,
 } from "../src/orchestrator";
 
 type CliOptions = {
@@ -72,8 +81,8 @@ function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
-function getRepoLockPath(repoRoot: string): string {
-  return resolve(repoRoot, ".mahilo-orchestrator", REPO_LOCK_NAME);
+function getRepoLockPath(repoRoot: string, workflow: WorkflowConfig): string {
+  return resolve(getRuntimeRoot(repoRoot, workflow), REPO_LOCK_NAME);
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -124,20 +133,28 @@ function tryRemoveStaleLock(lockPath: string): boolean {
   return false;
 }
 
-function acquireRepoLock(repoRoot: string, workflow: string, taskId: string): string {
-  const lockPath = getRepoLockPath(repoRoot);
-  mkdirSync(resolve(repoRoot, ".mahilo-orchestrator"), { recursive: true });
+function acquireRepoLock(
+  repoRoot: string,
+  workflow: WorkflowConfig,
+  taskId: string,
+): string {
+  const runtimeRoot = getRuntimeRoot(repoRoot, workflow);
+  const lockPath = getRepoLockPath(repoRoot, workflow);
+  mkdirSync(runtimeRoot, { recursive: true });
 
   while (true) {
     try {
       mkdirSync(lockPath);
       const owner: RepoLockOwner = {
         pid: process.pid,
-        workflow,
+        workflow: workflow.name,
         taskId,
         acquiredAt: new Date().toISOString(),
       };
-      writeFileSync(join(lockPath, "owner.json"), JSON.stringify(owner, null, 2));
+      writeFileSync(
+        join(lockPath, "owner.json"),
+        JSON.stringify(owner, null, 2),
+      );
       return lockPath;
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
@@ -172,18 +189,26 @@ function didTaskComplete(task: Task, lastMessage: string): boolean {
 }
 
 function didTaskBlock(task: Task, lastMessage: string): boolean {
-  return task.status === "blocked" || lastMessage.includes(`TASK_BLOCKED ${task.id}`);
+  return (
+    task.status === "blocked" || lastMessage.includes(`TASK_BLOCKED ${task.id}`)
+  );
 }
 
 function extractBlockedReason(taskId: string, lastMessage: string): string {
   return (
     lastMessage
       .split("\n")
-      .find((line) => line.includes(`TASK_BLOCKED ${taskId}`)) ?? `${taskId} blocked.`
+      .find((line) => line.includes(`TASK_BLOCKED ${taskId}`)) ??
+    `${taskId} blocked.`
   );
 }
 
-function maybePushBranch(repoRoot: string, branch: string, commitsSincePush: number, force = false) {
+function maybePushBranch(
+  repoRoot: string,
+  branch: string,
+  commitsSincePush: number,
+  force = false,
+) {
   if (!force && commitsSincePush <= 0) {
     return { pushed: false, error: null };
   }
@@ -201,10 +226,20 @@ function integrateTerminalTask(params: {
   historyNote: string;
   refreshedActionableTasks: Task[];
 } {
-  const { repoRoot, workflow, task, terminalStatus, rootActionableTasks, state } = params;
-  const integrationBranch = workflow.requiredBranch ?? getCurrentBranch(repoRoot);
+  const {
+    repoRoot,
+    workflow,
+    task,
+    terminalStatus,
+    rootActionableTasks,
+    state,
+  } = params;
+  const integrationBranch =
+    workflow.requiredBranch ?? getCurrentBranch(repoRoot);
   if (!integrationBranch) {
-    throw new Error("Could not determine the integration branch for task integration.");
+    throw new Error(
+      "Could not determine the integration branch for task integration.",
+    );
   }
 
   const workspace = ensureWorkspace(repoRoot, workflow, task);
@@ -212,17 +247,25 @@ function integrateTerminalTask(params: {
   const commitMessage = `orchestrator: ${commitVerb} ${task.id} ${task.title}`;
   const commitResult = commitPendingChanges(workspace.path, commitMessage);
   if (commitResult.error) {
-    throw new Error(`${task.id} ${commitVerb} auto-commit failed in task branch: ${commitResult.error}`);
+    throw new Error(
+      `${task.id} ${commitVerb} auto-commit failed in task branch: ${commitResult.error}`,
+    );
   }
 
   const currentWorkspaceBranch = getCurrentBranch(workspace.path);
-  if (workspace.kind === "shared" && currentWorkspaceBranch === integrationBranch) {
+  if (
+    workspace.kind === "shared" &&
+    currentWorkspaceBranch === integrationBranch
+  ) {
     const refreshedActionableTasks = loadTasks(repoRoot, workflow.taskSources);
     const refreshedTask = findTaskById(refreshedActionableTasks, task.id);
-    const terminalLabel = terminalStatus === "completed" ? "completed" : "blocked";
+    const terminalLabel =
+      terminalStatus === "completed" ? "completed" : "blocked";
 
     if (terminalStatus === "completed" && refreshedTask?.status !== "done") {
-      throw new Error(`${task.id} committed directly on ${integrationBranch} but root task status is not done.`);
+      throw new Error(
+        `${task.id} committed directly on ${integrationBranch} but root task status is not done.`,
+      );
     }
     if (terminalStatus === "blocked" && refreshedTask?.status !== "blocked") {
       throw new Error(
@@ -249,7 +292,12 @@ function integrateTerminalTask(params: {
         areAllTasksComplete(refreshedActionableTasks));
 
     if (shouldPush) {
-      const pushResult = maybePushBranch(repoRoot, integrationBranch, state.commitsSincePush, true);
+      const pushResult = maybePushBranch(
+        repoRoot,
+        integrationBranch,
+        state.commitsSincePush,
+        true,
+      );
       if (pushResult.error) {
         throw new Error(`${historyNote} Auto-push failed: ${pushResult.error}`);
       }
@@ -260,7 +308,7 @@ function integrateTerminalTask(params: {
     return { historyNote, refreshedActionableTasks };
   }
 
-  const lockPath = acquireRepoLock(repoRoot, workflow.name, task.id);
+  const lockPath = acquireRepoLock(repoRoot, workflow, task.id);
   try {
     const uniqueCommits = listUniqueCommits(workspace.path, integrationBranch);
     if (uniqueCommits.length === 0) {
@@ -281,7 +329,9 @@ function integrateTerminalTask(params: {
 
     const cherryPickResult = cherryPickCommits(repoRoot, uniqueCommits);
     if (cherryPickResult.error) {
-      throw new Error(`${task.id} integration failed: ${cherryPickResult.error}`);
+      throw new Error(
+        `${task.id} integration failed: ${cherryPickResult.error}`,
+      );
     }
 
     state.commitsSincePush += cherryPickResult.commitCount;
@@ -290,7 +340,8 @@ function integrateTerminalTask(params: {
 
     const refreshedActionableTasks = loadTasks(repoRoot, workflow.taskSources);
     const refreshedTask = findTaskById(refreshedActionableTasks, task.id);
-    const terminalLabel = terminalStatus === "completed" ? "completed" : "blocked";
+    const terminalLabel =
+      terminalStatus === "completed" ? "completed" : "blocked";
     let historyNote = `${task.id} ${terminalLabel} and integrated ${cherryPickResult.commitCount} commit${
       cherryPickResult.commitCount === 1 ? "" : "s"
     }${cherryPickResult.lastCommitSha ? ` as ${cherryPickResult.lastCommitSha}` : ""}.`;
@@ -301,7 +352,12 @@ function integrateTerminalTask(params: {
         areAllTasksComplete(refreshedActionableTasks));
 
     if (shouldPush) {
-      const pushResult = maybePushBranch(repoRoot, integrationBranch, state.commitsSincePush, true);
+      const pushResult = maybePushBranch(
+        repoRoot,
+        integrationBranch,
+        state.commitsSincePush,
+        true,
+      );
       if (pushResult.error) {
         throw new Error(`${historyNote} Auto-push failed: ${pushResult.error}`);
       }
@@ -310,10 +366,14 @@ function integrateTerminalTask(params: {
     }
 
     if (terminalStatus === "completed" && refreshedTask?.status !== "done") {
-      throw new Error(`${task.id} integrated successfully but root task status is not done.`);
+      throw new Error(
+        `${task.id} integrated successfully but root task status is not done.`,
+      );
     }
     if (terminalStatus === "blocked" && refreshedTask?.status !== "blocked") {
-      throw new Error(`${task.id} integrated successfully but root task status is not blocked.`);
+      throw new Error(
+        `${task.id} integrated successfully but root task status is not blocked.`,
+      );
     }
 
     return { historyNote, refreshedActionableTasks };
@@ -340,18 +400,33 @@ async function main() {
   const maxIterations = options.maxIterations ?? workflow.maxIterations;
 
   for (let loop = 0; loop < maxIterations; loop += 1) {
-    const { actionable, taskUniverse } = loadActionableTasks(repoRoot, options.workflowFile);
+    const { actionable, taskUniverse } = loadActionableTasks(
+      repoRoot,
+      options.workflowFile,
+    );
     const task = selectNextTask(actionable, state.activeTaskId, taskUniverse);
 
     if (!task) {
       state.activeTaskId = null;
-      appendProgress(repoRoot, workflow, [formatHistoryNote(null, "idle", "No ready tasks.")]);
+      appendProgress(repoRoot, workflow, [
+        formatHistoryNote(null, "idle", "No ready tasks."),
+      ]);
       saveState(repoRoot, workflow, state);
 
       if (areAllTasksComplete(actionable)) {
-        const integrationBranch = workflow.requiredBranch ?? getCurrentBranch(repoRoot);
-        if (integrationBranch && workflow.autoCommitOnDone && state.commitsSincePush > 0) {
-          const pushResult = maybePushBranch(repoRoot, integrationBranch, state.commitsSincePush, true);
+        const integrationBranch =
+          workflow.requiredBranch ?? getCurrentBranch(repoRoot);
+        if (
+          integrationBranch &&
+          workflow.autoCommitOnDone &&
+          state.commitsSincePush > 0
+        ) {
+          const pushResult = maybePushBranch(
+            repoRoot,
+            integrationBranch,
+            state.commitsSincePush,
+            true,
+          );
           if (pushResult.error) {
             console.error(`Final auto-push failed: ${pushResult.error}`);
             process.exit(1);
@@ -388,7 +463,9 @@ async function main() {
     ]);
     saveState(repoRoot, workflow, state);
 
-    console.log(`\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`);
+    console.log(
+      `\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`,
+    );
     console.log(`Workspace: ${workspacePreview}`);
 
     if (options.dryRun) {
@@ -397,21 +474,34 @@ async function main() {
       console.log(`- Status: ${task.status}`);
       console.log(`- Priority: ${task.priority}`);
       console.log(`- Depends on: ${task.dependsOn.join(", ") || "None"}`);
-      console.log(`- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`);
+      console.log(
+        `- Prompt preview: ${prompt.slice(0, 400)}${prompt.length > 400 ? "..." : ""}`,
+      );
       return;
     }
 
     const workspace = ensureWorkspace(repoRoot, workflow, task);
-    const runResult = runAgentForTask(repoRoot, workflow, task, workspace.path, buildTaskPrompt(workflow, task, workspace.path));
+    const runResult = runAgentForTask(
+      repoRoot,
+      workflow,
+      task,
+      workspace.path,
+      buildTaskPrompt(workflow, task, workspace.path),
+    );
 
     let refreshedActionableTasks = actionable;
-    let historyStatus: "completed" | "blocked" | "agent_error" | "continued" = "continued";
+    let historyStatus: "completed" | "blocked" | "agent_error" | "continued" =
+      "continued";
     let historyNote = `Agent exited with code ${runResult.exitCode}.`;
     let stopAfterIteration = false;
 
     try {
-      const workspaceActionableTasks = loadTasks(workspace.path, workflow.taskSources);
-      const workspaceTask = findTaskById(workspaceActionableTasks, task.id) ?? task;
+      const workspaceActionableTasks = loadTasks(
+        workspace.path,
+        workflow.taskSources,
+      );
+      const workspaceTask =
+        findTaskById(workspaceActionableTasks, task.id) ?? task;
 
       if (runResult.exitCode !== 0) {
         historyStatus = "agent_error";
@@ -453,7 +543,9 @@ async function main() {
         state.activeTaskId = task.id;
       }
 
-      appendProgress(repoRoot, workflow, [formatHistoryNote(task.id, historyStatus, historyNote)]);
+      appendProgress(repoRoot, workflow, [
+        formatHistoryNote(task.id, historyStatus, historyNote),
+      ]);
       state.history.push({
         iteration: state.iteration,
         taskId: task.id,
@@ -466,7 +558,9 @@ async function main() {
       historyStatus = "agent_error";
       historyNote = error instanceof Error ? error.message : String(error);
       state.activeTaskId = null;
-      appendProgress(repoRoot, workflow, [formatHistoryNote(task.id, historyStatus, historyNote)]);
+      appendProgress(repoRoot, workflow, [
+        formatHistoryNote(task.id, historyStatus, historyNote),
+      ]);
       state.history.push({
         iteration: state.iteration,
         taskId: task.id,
@@ -487,9 +581,19 @@ async function main() {
       runResult.lastMessage.includes(workflow.completionPhrase) ||
       areAllTasksComplete(refreshedActionableTasks)
     ) {
-      const integrationBranch = workflow.requiredBranch ?? getCurrentBranch(repoRoot);
-      if (integrationBranch && workflow.autoCommitOnDone && state.commitsSincePush > 0) {
-        const pushResult = maybePushBranch(repoRoot, integrationBranch, state.commitsSincePush, true);
+      const integrationBranch =
+        workflow.requiredBranch ?? getCurrentBranch(repoRoot);
+      if (
+        integrationBranch &&
+        workflow.autoCommitOnDone &&
+        state.commitsSincePush > 0
+      ) {
+        const pushResult = maybePushBranch(
+          repoRoot,
+          integrationBranch,
+          state.commitsSincePush,
+          true,
+        );
         if (pushResult.error) {
           console.error(`Final auto-push failed: ${pushResult.error}`);
           process.exit(1);
@@ -511,7 +615,9 @@ async function main() {
     }
   }
 
-  console.log(`Reached max iterations without seeing ${workflow.completionPhrase}.`);
+  console.log(
+    `Reached max iterations without seeing ${workflow.completionPhrase}.`,
+  );
 }
 
 main();
