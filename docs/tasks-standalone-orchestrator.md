@@ -96,18 +96,22 @@ Create a standalone CLI entrypoint around the orchestrator core.
 ### 1.3 Preserve runtime artifacts
 
 - **ID**: `ORCH-012`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-010
+- **Notes**:
+  - 2026-03-10: Auditing the extracted standalone core to lock progress, state, and per-task last-message artifacts in place with explicit tests and README documentation.
+  - 2026-03-10: Confirmed standalone progress/state writing plus per-task last-message capture with dedicated unit coverage and documented the runtime artifacts in `README.md`.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check README.md docs/tasks-standalone-orchestrator.md tests/unit/orchestrator-runtime-artifacts.test.ts`.
 
 Preserve the current durable runtime artifacts as first-class features.
 
 **Acceptance Criteria**
 
-- [ ] Progress file support exists
-- [ ] State file support exists
-- [ ] Per-task last-message capture exists
-- [ ] README explains why these files exist
+- [x] Progress file support exists
+- [x] State file support exists
+- [x] Per-task last-message capture exists
+- [x] README explains why these files exist
 
 ### 1.4 Add decision doc support
 

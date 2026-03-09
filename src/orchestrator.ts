@@ -1114,6 +1114,12 @@ function maybePushBranch(
   return pushBranch(repoRoot, branch);
 }
 
+function isAutoPushEnabled(
+  workflow: Pick<WorkflowConfig, "autoPushEveryCommits">,
+) {
+  return workflow.autoPushEveryCommits > 0;
+}
+
 function integrateTerminalTask(params: {
   repoRoot: string;
   workflow: WorkflowConfig;
@@ -1185,7 +1191,7 @@ function integrateTerminalTask(params: {
     }
 
     const shouldPush =
-      workflow.autoPushEveryCommits > 0 &&
+      isAutoPushEnabled(workflow) &&
       state.commitsSincePush > 0 &&
       (state.commitsSincePush >= workflow.autoPushEveryCommits ||
         areAllTasksComplete(refreshedActionableTasks));
@@ -1246,7 +1252,7 @@ function integrateTerminalTask(params: {
     }${cherryPickResult.lastCommitSha ? ` as ${cherryPickResult.lastCommitSha}` : ""}.`;
 
     const shouldPush =
-      workflow.autoPushEveryCommits > 0 &&
+      isAutoPushEnabled(workflow) &&
       (state.commitsSincePush >= workflow.autoPushEveryCommits ||
         areAllTasksComplete(refreshedActionableTasks));
 
@@ -1328,6 +1334,7 @@ export function runOrchestratorLoop(
         if (
           integrationBranch &&
           workflow.autoCommitOnDone &&
+          isAutoPushEnabled(workflow) &&
           state.commitsSincePush > 0
         ) {
           const pushResult = maybePushBranch(
@@ -1496,6 +1503,7 @@ export function runOrchestratorLoop(
       if (
         integrationBranch &&
         workflow.autoCommitOnDone &&
+        isAutoPushEnabled(workflow) &&
         state.commitsSincePush > 0
       ) {
         const pushResult = maybePushBranch(

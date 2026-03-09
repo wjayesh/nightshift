@@ -17,7 +17,8 @@ max_iterations: 50
 poll_interval_seconds: 3
 completion_phrase: COMPLETE
 auto_commit_on_done: true
-auto_push_every_commits: 3
+# 0 disables automatic pushes; commits remain local until manually pushed.
+auto_push_every_commits: 0
 ---
 
 # Standalone Orchestrator Workflow

@@ -100,6 +100,13 @@ function runCli(repoRoot: string, args: string[]) {
   });
 }
 
+function runGit(repoRoot: string, args: string[]) {
+  return spawnSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+}
+
 afterEach(() => {
   while (TEMP_REPOS.length > 0) {
     const repoRoot = TEMP_REPOS.pop();
@@ -155,5 +162,43 @@ describe("standalone orchestrator CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("- Task: TASK-ALT");
     expect(result.stdout).not.toContain("- Task: TASK-001");
+  });
+
+  it("skips final push when auto-push is disabled", () => {
+    const repoRoot = createTempRepo();
+    mkdirSync(join(repoRoot, ".orchestrator"), { recursive: true });
+    writeFileSync(
+      join(repoRoot, "docs/tasks.md"),
+      `### Completed Task
+- **ID**: \`TASK-001\`
+- **Status**: \`done\`
+- **Priority**: P0
+- **Depends on**: None
+`,
+    );
+    writeFileSync(
+      join(repoRoot, ".orchestrator/state.json"),
+      JSON.stringify(
+        {
+          workflowPath: "WORKFLOW.md",
+          iteration: 3,
+          activeTaskId: null,
+          commitsSincePush: 2,
+          lastCommittedTaskId: "TASK-001",
+          lastCommitSha: "abc1234",
+          history: [],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    expect(runGit(repoRoot, ["init", "-b", "main"]).status).toBe(0);
+
+    const result = runCli(repoRoot, ["--once"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("COMPLETE");
+    expect(result.stderr).toBe("");
   });
 });

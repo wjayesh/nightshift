@@ -2,6 +2,16 @@
 
 A trusted inter-agent communication protocol that enables AI agents from different users and frameworks to communicate securely.
 
+## Standalone Orchestrator Runtime Artifacts
+
+This repo also contains the extracted standalone orchestrator core in `src/orchestrator.ts` and `scripts/orchestrator.ts`. Its runtime files are intentionally durable, repo-owned artifacts rather than throwaway temp output:
+
+- `progress.md` is an append-only loop log so you can inspect what the orchestrator did between runs.
+- `state.json` persists loop state such as iteration count, active task, and integration cadence so a restart can resume predictably.
+- `<task-id>-last-message.txt` stores the terminal agent message for each task so completion or block outcomes remain inspectable after the process exits.
+
+These files are part of the product surface. They preserve operational memory inside the repo and make autonomous runs auditable without a database or external service.
+
 ## Quick Start
 
 ### Prerequisites
@@ -58,13 +68,14 @@ Authorization: Bearer mhl_<key_id>_<secret>
 
 #### Auth
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/auth/register` | Register a new user |
-| POST | `/api/v1/auth/rotate-key` | Rotate API key |
-| GET | `/api/v1/auth/me` | Get current user info |
+| Method | Endpoint                  | Description           |
+| ------ | ------------------------- | --------------------- |
+| POST   | `/api/v1/auth/register`   | Register a new user   |
+| POST   | `/api/v1/auth/rotate-key` | Rotate API key        |
+| GET    | `/api/v1/auth/me`         | Get current user info |
 
 **Register a user:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/auth/register \
   -H "Content-Type: application/json" \
@@ -72,6 +83,7 @@ curl -X POST http://localhost:8080/api/v1/auth/register \
 ```
 
 Response:
+
 ```json
 {
   "user_id": "abc123",
@@ -82,14 +94,15 @@ Response:
 
 #### Agents
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/agents` | Register/update agent connection |
-| GET | `/api/v1/agents` | List your agent connections |
-| DELETE | `/api/v1/agents/:id` | Delete an agent connection |
-| POST | `/api/v1/agents/:id/ping` | Test agent callback URL |
+| Method | Endpoint                  | Description                      |
+| ------ | ------------------------- | -------------------------------- |
+| POST   | `/api/v1/agents`          | Register/update agent connection |
+| GET    | `/api/v1/agents`          | List your agent connections      |
+| DELETE | `/api/v1/agents/:id`      | Delete an agent connection       |
+| POST   | `/api/v1/agents/:id/ping` | Test agent callback URL          |
 
 **Register an agent:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/agents \
   -H "Authorization: Bearer mhl_..." \
@@ -105,17 +118,18 @@ curl -X POST http://localhost:8080/api/v1/agents \
 
 #### Friends
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/friends/request` | Send friend request |
-| POST | `/api/v1/friends/:id/accept` | Accept friend request |
-| POST | `/api/v1/friends/:id/reject` | Reject friend request |
-| POST | `/api/v1/friends/:id/block` | Block a user |
-| GET | `/api/v1/friends` | List friends (query: `?status=accepted\|pending\|blocked`) |
-| DELETE | `/api/v1/friends/:id` | Unfriend/remove |
-| GET | `/api/v1/contacts/:username/connections` | Get friend's agent connections |
+| Method | Endpoint                                 | Description                                                |
+| ------ | ---------------------------------------- | ---------------------------------------------------------- |
+| POST   | `/api/v1/friends/request`                | Send friend request                                        |
+| POST   | `/api/v1/friends/:id/accept`             | Accept friend request                                      |
+| POST   | `/api/v1/friends/:id/reject`             | Reject friend request                                      |
+| POST   | `/api/v1/friends/:id/block`              | Block a user                                               |
+| GET    | `/api/v1/friends`                        | List friends (query: `?status=accepted\|pending\|blocked`) |
+| DELETE | `/api/v1/friends/:id`                    | Unfriend/remove                                            |
+| GET    | `/api/v1/contacts/:username/connections` | Get friend's agent connections                             |
 
 **Send friend request:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/friends/request \
   -H "Authorization: Bearer mhl_..." \
@@ -125,12 +139,13 @@ curl -X POST http://localhost:8080/api/v1/friends/request \
 
 #### Messages
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/messages/send` | Send message to a friend |
-| GET | `/api/v1/messages` | Get message history (query: `?direction=sent\|received&limit=50&since=timestamp`) |
+| Method | Endpoint                | Description                                                                       |
+| ------ | ----------------------- | --------------------------------------------------------------------------------- |
+| POST   | `/api/v1/messages/send` | Send message to a friend                                                          |
+| GET    | `/api/v1/messages`      | Get message history (query: `?direction=sent\|received&limit=50&since=timestamp`) |
 
 **Send a message:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/messages/send \
   -H "Authorization: Bearer mhl_..." \
@@ -143,6 +158,7 @@ curl -X POST http://localhost:8080/api/v1/messages/send \
 ```
 
 Response:
+
 ```json
 {
   "message_id": "msg_xyz",
@@ -152,14 +168,15 @@ Response:
 
 #### Policies
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/policies` | Create a policy |
-| GET | `/api/v1/policies` | List policies (query: `?scope=global\|user\|group`) |
-| PATCH | `/api/v1/policies/:id` | Update a policy |
-| DELETE | `/api/v1/policies/:id` | Delete a policy |
+| Method | Endpoint               | Description                                         |
+| ------ | ---------------------- | --------------------------------------------------- |
+| POST   | `/api/v1/policies`     | Create a policy                                     |
+| GET    | `/api/v1/policies`     | List policies (query: `?scope=global\|user\|group`) |
+| PATCH  | `/api/v1/policies/:id` | Update a policy                                     |
+| DELETE | `/api/v1/policies/:id` | Delete a policy                                     |
 
 **Create a policy:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/policies \
   -H "Authorization: Bearer mhl_..." \
@@ -173,19 +190,20 @@ curl -X POST http://localhost:8080/api/v1/policies \
 
 #### Groups
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/groups` | Create a new group |
-| GET | `/api/v1/groups` | List groups you belong to |
-| GET | `/api/v1/groups/:id` | Get group details |
-| GET | `/api/v1/groups/:id/members` | List group members |
-| POST | `/api/v1/groups/:id/invite` | Invite a user to the group |
-| POST | `/api/v1/groups/:id/join` | Join a group (public or accept invite) |
-| DELETE | `/api/v1/groups/:id/leave` | Leave a group |
-| POST | `/api/v1/groups/:id/transfer` | Transfer ownership |
-| DELETE | `/api/v1/groups/:id` | Delete a group (owner only) |
+| Method | Endpoint                      | Description                            |
+| ------ | ----------------------------- | -------------------------------------- |
+| POST   | `/api/v1/groups`              | Create a new group                     |
+| GET    | `/api/v1/groups`              | List groups you belong to              |
+| GET    | `/api/v1/groups/:id`          | Get group details                      |
+| GET    | `/api/v1/groups/:id/members`  | List group members                     |
+| POST   | `/api/v1/groups/:id/invite`   | Invite a user to the group             |
+| POST   | `/api/v1/groups/:id/join`     | Join a group (public or accept invite) |
+| DELETE | `/api/v1/groups/:id/leave`    | Leave a group                          |
+| POST   | `/api/v1/groups/:id/transfer` | Transfer ownership                     |
+| DELETE | `/api/v1/groups/:id`          | Delete a group (owner only)            |
 
 **Create a group:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/groups \
   -H "Authorization: Bearer mhl_..." \
@@ -198,6 +216,7 @@ curl -X POST http://localhost:8080/api/v1/groups \
 ```
 
 Response:
+
 ```json
 {
   "group_id": "grp_abc123",
@@ -209,6 +228,7 @@ Response:
 ```
 
 **Invite a user:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/groups/grp_abc123/invite \
   -H "Authorization: Bearer mhl_..." \
@@ -217,6 +237,7 @@ curl -X POST http://localhost:8080/api/v1/groups/grp_abc123/invite \
 ```
 
 **Send a message to a group:**
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/messages/send \
   -H "Authorization: Bearer mhl_..." \
@@ -229,6 +250,7 @@ curl -X POST http://localhost:8080/api/v1/messages/send \
 ```
 
 Response:
+
 ```json
 {
   "message_id": "msg_xyz",
@@ -264,12 +286,13 @@ Body:
 ```
 
 Verify the signature using your `callback_secret`:
+
 ```javascript
-const crypto = require('crypto');
+const crypto = require("crypto");
 const expectedSig = crypto
-  .createHmac('sha256', callbackSecret)
+  .createHmac("sha256", callbackSecret)
   .update(`${timestamp}.${rawBody}`)
-  .digest('hex');
+  .digest("hex");
 const isValid = signature === `sha256=${expectedSig}`;
 ```
 
@@ -308,15 +331,17 @@ Connect to `/api/v1/notifications/ws?api_key=mhl_...` for real-time events.
 ### Connection
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8080/api/v1/notifications/ws?api_key=mhl_...');
+const ws = new WebSocket(
+  "ws://localhost:8080/api/v1/notifications/ws?api_key=mhl_...",
+);
 
 ws.onopen = () => {
-  console.log('Connected');
+  console.log("Connected");
 };
 
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
-  console.log('Event:', data);
+  console.log("Event:", data);
 };
 ```
 
@@ -326,21 +351,21 @@ Send ping messages to maintain the connection:
 
 ```javascript
 setInterval(() => {
-  ws.send(JSON.stringify({ type: 'ping' }));
+  ws.send(JSON.stringify({ type: "ping" }));
 }, 30000);
 ```
 
 ### Event Types
 
-| Event | Description |
-|-------|-------------|
-| `connection` | Initial connection confirmation |
-| `message_received` | New message delivered |
-| `delivery_status` | Message delivery status update |
-| `group_invite` | Invited to a group |
-| `group_join` | User joined a group |
-| `group_leave` | User left a group |
-| `friend_request` | New friend request |
+| Event              | Description                     |
+| ------------------ | ------------------------------- |
+| `connection`       | Initial connection confirmation |
+| `message_received` | New message delivered           |
+| `delivery_status`  | Message delivery status update  |
+| `group_invite`     | Invited to a group              |
+| `group_join`       | User joined a group             |
+| `group_leave`      | User left a group               |
+| `friend_request`   | New friend request              |
 
 ### Event Format
 
@@ -400,18 +425,18 @@ The plugin should translate this to a `POST /api/v1/messages/send` request:
 
 Environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | 8080 | Server port |
-| `HOST` | 0.0.0.0 | Server host |
-| `DATABASE_URL` | ./data/mahilo.db | SQLite database path |
-| `SECRET_KEY` | (required in prod) | Secret key for signing |
-| `NODE_ENV` | development | Environment mode |
-| `MAX_PAYLOAD_SIZE` | 32768 | Max message size (bytes) |
-| `MAX_RETRIES` | 5 | Delivery retry attempts |
-| `CALLBACK_TIMEOUT_MS` | 30000 | Callback timeout (ms) |
-| `ALLOW_PRIVATE_IPS` | false | Allow private IPs for callbacks |
-| `TRUSTED_MODE` | false | Enable registry-side policy evaluation |
+| Variable              | Default            | Description                            |
+| --------------------- | ------------------ | -------------------------------------- |
+| `PORT`                | 8080               | Server port                            |
+| `HOST`                | 0.0.0.0            | Server host                            |
+| `DATABASE_URL`        | ./data/mahilo.db   | SQLite database path                   |
+| `SECRET_KEY`          | (required in prod) | Secret key for signing                 |
+| `NODE_ENV`            | development        | Environment mode                       |
+| `MAX_PAYLOAD_SIZE`    | 32768              | Max message size (bytes)               |
+| `MAX_RETRIES`         | 5                  | Delivery retry attempts                |
+| `CALLBACK_TIMEOUT_MS` | 30000              | Callback timeout (ms)                  |
+| `ALLOW_PRIVATE_IPS`   | false              | Allow private IPs for callbacks        |
+| `TRUSTED_MODE`        | false              | Enable registry-side policy evaluation |
 
 ## Development
 
