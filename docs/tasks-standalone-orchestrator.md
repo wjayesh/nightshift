@@ -425,9 +425,12 @@ Add a lightweight supervisor that restarts the standalone worker when it dies or
 ### 4.6 Add optional `launchd` support
 
 - **ID**: `ORCH-045`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P0
 - **Depends on**: ORCH-044
+- **Notes**:
+  - 2026-03-10: Added `scripts/orchestrator-launchd.ts` plus a launchd CLI in `src/orchestrator.ts` that prints, installs, and uninstalls a LaunchAgent wrapper for the standalone supervisor while keeping macOS-specific behavior outside the core worker loop.
+  - 2026-03-10: Added focused `launchd` tests and README/operator docs, then validated with `bun test tests/unit/orchestrator-launchd.test.ts tests/unit/orchestrator-supervisor.test.ts tests/unit/orchestrator-cli.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check README.md docs/decisions.md src/orchestrator.ts scripts/orchestrator-launchd.ts tests/unit/orchestrator-launchd.test.ts`.
 
 Provide an optional macOS `launchd` installer without making it a core requirement.
 

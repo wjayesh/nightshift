@@ -297,6 +297,46 @@ The worker refreshes runtime health at loop transitions, not continuously while
 the agent command is still running, so a very aggressive stall timeout will
 restart healthy long-running tasks.
 
+## Optional macOS `launchd`
+
+If you want the supervisor to start from a user LaunchAgent on macOS, use the
+separate `launchd` helper. Ignore this section on Linux or other environments;
+the main worker and supervisor CLIs do not depend on it.
+
+Preview the generated LaunchAgent plist before installing it:
+
+```bash
+bun run scripts/orchestrator-launchd.ts print --workflow WORKFLOW.orchestrator.md
+```
+
+Install it into `~/Library/LaunchAgents` and load it with `launchctl`:
+
+```bash
+bun run scripts/orchestrator-launchd.ts install --workflow WORKFLOW.orchestrator.md
+```
+
+Unload the LaunchAgent and remove the plist:
+
+```bash
+bun run scripts/orchestrator-launchd.ts uninstall --workflow WORKFLOW.orchestrator.md
+```
+
+The generated plist runs `scripts/orchestrator-supervisor.ts run`, sets
+`WorkingDirectory` to the repo root, writes `launchd.out.log` and
+`launchd.err.log` next to the configured runtime `state_file`, and injects
+explicit `PATH` plus `HOME` values into the LaunchAgent environment so `bun`,
+`git`, and the configured agent CLI resolve the same way they do from a
+terminal session.
+
+The default label is derived from the repo directory plus workflow path. Pass
+`--label` if you need a stable custom label, or `--launch-agent-dir` if you do
+not want to use the default `~/Library/LaunchAgents` location.
+
+Use the `launchd` helper to stop a LaunchAgent-backed supervisor permanently.
+If the LaunchAgent is still loaded, `bun run scripts/orchestrator-supervisor.ts stop`
+only stops the current process and `launchd` will start it again on the next
+load decision because that service is still installed.
+
 ## Decision Docs
 
 Decision logging is configured by `decision_file`. The default shape is a plain
@@ -372,19 +412,25 @@ If you want a copyable starting point instead of a blank file, use
 `docs/tasks.md`, and `docs/decisions.md`.
 
 1. Copy `src/orchestrator.ts` and `scripts/orchestrator.ts` into the new repo.
-2. Add a root `WORKFLOW.md` based on `WORKFLOW.orchestrator.md`.
-3. Create `docs/tasks.md` and `docs/decisions.md`.
-4. Point `task_sources`, `instruction_files`, and `decision_file` at docs that
+2. Copy `scripts/orchestrator-supervisor.ts` if you want repo-local supervised
+   mode.
+3. Copy `scripts/orchestrator-launchd.ts` if you want the optional macOS
+   LaunchAgent installer.
+4. Add a root `WORKFLOW.md` based on `WORKFLOW.orchestrator.md`.
+5. Create `docs/tasks.md` and `docs/decisions.md`.
+6. Point `task_sources`, `instruction_files`, and `decision_file` at docs that
    make sense for the new project.
-5. Set `agent_command` and `agent_args` to the local agent CLI you actually use.
-6. Keep runtime output under `.orchestrator/`.
-7. Run `bun run scripts/orchestrator.ts --once --dry-run` before the first live
+7. Set `agent_command` and `agent_args` to the local agent CLI you actually use.
+8. Keep runtime output under `.orchestrator/`.
+9. Run `bun run scripts/orchestrator.ts --once --dry-run` before the first live
    execution.
 
 What usually stays unchanged:
 
 - `src/orchestrator.ts`
 - `scripts/orchestrator.ts`
+- `scripts/orchestrator-supervisor.ts` if you use supervised mode
+- `scripts/orchestrator-launchd.ts` if you use macOS `launchd`
 - the `.orchestrator/` runtime layout
 
 What you usually edit per repo:

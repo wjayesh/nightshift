@@ -15,6 +15,7 @@ import {
   resolve,
 } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 
 export type TaskStatus =
   | "pending"
@@ -205,6 +206,40 @@ export type OrchestratorSupervisorRuntimeOptions = {
   scriptPath?: string;
 };
 
+export type OrchestratorLaunchdCliCommand = "print" | "install" | "uninstall";
+
+export type OrchestratorLaunchdCliOptions = {
+  command: OrchestratorLaunchdCliCommand;
+  workflowFile: string;
+  label: string | null;
+  launchAgentDir: string | null;
+  path: string | null;
+  home: string | null;
+  stallSeconds: number;
+  checkIntervalSeconds: number;
+  restartDelaySeconds: number;
+  help: boolean;
+};
+
+type LaunchctlCommandResult = {
+  status: number | null;
+  stdout?: string;
+  stderr?: string;
+  error?: Error | null;
+};
+
+export type OrchestratorLaunchdRuntimeOptions = {
+  repoRoot?: string;
+  log?: (message: string) => void;
+  error?: (message: string) => void;
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  uid?: number | null;
+  scriptPath?: string;
+  runLaunchctl?: (args: string[]) => LaunchctlCommandResult;
+};
+
 export type OrchestratorSupervisorState =
   | "starting"
   | "running"
@@ -320,6 +355,9 @@ const STALE_LOCK_MS = 60_000;
 const DEFAULT_SUPERVISOR_STALL_SECONDS = 1800;
 const DEFAULT_SUPERVISOR_CHECK_INTERVAL_SECONDS = 5;
 const DEFAULT_SUPERVISOR_RESTART_DELAY_SECONDS = 3;
+const DEFAULT_LAUNCH_AGENT_DIR = "Library/LaunchAgents";
+const DEFAULT_LAUNCHD_PATH =
+  "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const PROCESS_EXIT_POLL_MS = 100;
 
 function parseScalarValue(value: string): string | number {
@@ -715,6 +753,20 @@ export function getSupervisorStatusPath(
   config: Pick<WorkflowConfig, "stateFile">,
 ) {
   return getRuntimeArtifactPath(repoRoot, config, "supervisor-status.json");
+}
+
+export function getLaunchdStdoutPath(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+) {
+  return getRuntimeArtifactPath(repoRoot, config, "launchd.out.log");
+}
+
+export function getLaunchdStderrPath(
+  repoRoot: string,
+  config: Pick<WorkflowConfig, "stateFile">,
+) {
+  return getRuntimeArtifactPath(repoRoot, config, "launchd.err.log");
 }
 
 export function loadTasks(repoRoot: string, taskSources: string[]): Task[] {
@@ -1202,10 +1254,11 @@ export function buildTaskPrompt(
     `2. Do not edit task-tracker status metadata in ${task.filePath}; leave the assigned task's \`Status\` line unchanged and let the orchestrator record terminal \`done\` or \`blocked\` status on the integration branch.`,
     `3. Update ${config.decisionFile} if you make or revise a consequential implementation decision.`,
     "4. Do not edit the orchestrator progress/state files directly; the orchestrator records runtime progress for you.",
-    "5. Run the most relevant tests or validation commands for the files you changed when feasible.",
-    `6. If the task is fully complete, say \`TASK_DONE ${task.id}\` in the final message.`,
-    `7. If the task is blocked, say \`TASK_BLOCKED ${task.id}: <reason>\` in the final message.`,
-    `8. If all tracked tasks are complete, say \`${config.completionPhrase}\` in the final message.`,
+    "5. Issue developer tool calls serially; do not start a second shell or file-edit command until the previous tool call has returned.",
+    "6. Run the most relevant tests or validation commands for the files you changed when feasible.",
+    `7. If the task is fully complete, say \`TASK_DONE ${task.id}\` in the final message.`,
+    `8. If the task is blocked, say \`TASK_BLOCKED ${task.id}: <reason>\` in the final message.`,
+    `9. If all tracked tasks are complete, say \`${config.completionPhrase}\` in the final message.`,
   ].join("\n");
 }
 
@@ -1409,8 +1462,9 @@ function buildReviewPrompt(
     "3. If you find missed acceptance criteria, regressions, or follow-up work that must happen soon, add remediation task entries directly to the relevant task doc.",
     "4. Any remediation task you create must start as `pending` and use `Priority: P0`.",
     "5. Follow the existing task-doc format (`ID`, `Status`, `Priority`, `Depends on`) so the scheduler can pick the new work up.",
-    "6. Do not edit the orchestrator runtime progress/state files directly; the orchestrator records the review outcome for you.",
-    "7. Start your final message with `REVIEW_DONE:` and list any remediation task IDs you created.",
+    "6. Issue developer tool calls serially; do not start a second shell or file-edit command until the previous tool call has returned.",
+    "7. Do not edit the orchestrator runtime progress/state files directly; the orchestrator records the review outcome for you.",
+    "8. Start your final message with `REVIEW_DONE:` and list any remediation task IDs you created.",
   ].join("\n");
 }
 
@@ -2190,6 +2244,216 @@ export function parseOrchestratorSupervisorCliArgs(
   return options;
 }
 
+export function formatOrchestratorLaunchdCliUsage(
+  scriptPath = "scripts/orchestrator-launchd.ts",
+): string {
+  return [
+    `Usage: bun run ${scriptPath} [command] [options]`,
+    "",
+    "Commands:",
+    "  print                  Print the generated LaunchAgent plist (default)",
+    "  install                Write the plist to LaunchAgents and load it with launchctl",
+    "  uninstall              Unload the plist and remove it from LaunchAgents",
+    "",
+    "Options:",
+    `  --workflow <path>              Workflow file to load (default: ${DEFAULT_WORKFLOW_FILE})`,
+    "  --label <value>                Override the generated launchd label",
+    `  --launch-agent-dir <path>      Override the LaunchAgents directory (default: ~/${DEFAULT_LAUNCH_AGENT_DIR})`,
+    "  --path <value>                 PATH to inject into the LaunchAgent environment",
+    "  --home <path>                  HOME to inject into the LaunchAgent environment",
+    `  --stall-seconds <n>            Supervisor stall timeout to encode in ProgramArguments (default: ${DEFAULT_SUPERVISOR_STALL_SECONDS})`,
+    `  --check-interval-seconds <n>   Supervisor poll interval to encode in ProgramArguments (default: ${DEFAULT_SUPERVISOR_CHECK_INTERVAL_SECONDS})`,
+    `  --restart-delay-seconds <n>    Supervisor restart delay to encode in ProgramArguments (default: ${DEFAULT_SUPERVISOR_RESTART_DELAY_SECONDS})`,
+    "  --help                         Show this help text",
+  ].join("\n");
+}
+
+export function parseOrchestratorLaunchdCliArgs(
+  argv: string[],
+): OrchestratorLaunchdCliOptions {
+  const options: OrchestratorLaunchdCliOptions = {
+    command: "print",
+    workflowFile: DEFAULT_WORKFLOW_FILE,
+    label: null,
+    launchAgentDir: null,
+    path: null,
+    home: null,
+    stallSeconds: DEFAULT_SUPERVISOR_STALL_SECONDS,
+    checkIntervalSeconds: DEFAULT_SUPERVISOR_CHECK_INTERVAL_SECONDS,
+    restartDelaySeconds: DEFAULT_SUPERVISOR_RESTART_DELAY_SECONDS,
+    help: false,
+  };
+
+  let index = 0;
+  const firstArg = argv[0];
+  if (
+    firstArg === "print" ||
+    firstArg === "install" ||
+    firstArg === "uninstall"
+  ) {
+    options.command = firstArg;
+    index = 1;
+  }
+
+  for (; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    if (arg === "--help" || arg === "-h") {
+      options.help = true;
+      continue;
+    }
+
+    if (arg.startsWith("--workflow=")) {
+      const workflowFile = arg.slice("--workflow=".length);
+      if (!workflowFile) {
+        throw new Error("--workflow requires a value.");
+      }
+      options.workflowFile = workflowFile;
+      continue;
+    }
+
+    if (arg === "--workflow") {
+      options.workflowFile = readCliValue(argv, index, "--workflow");
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--label=")) {
+      const label = arg.slice("--label=".length).trim();
+      if (!label) {
+        throw new Error("--label requires a value.");
+      }
+      options.label = label;
+      continue;
+    }
+
+    if (arg === "--label") {
+      options.label = readCliValue(argv, index, "--label").trim();
+      if (!options.label) {
+        throw new Error("--label requires a value.");
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--launch-agent-dir=")) {
+      const launchAgentDir = arg.slice("--launch-agent-dir=".length).trim();
+      if (!launchAgentDir) {
+        throw new Error("--launch-agent-dir requires a value.");
+      }
+      options.launchAgentDir = launchAgentDir;
+      continue;
+    }
+
+    if (arg === "--launch-agent-dir") {
+      options.launchAgentDir = readCliValue(
+        argv,
+        index,
+        "--launch-agent-dir",
+      ).trim();
+      if (!options.launchAgentDir) {
+        throw new Error("--launch-agent-dir requires a value.");
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--path=")) {
+      const pathValue = arg.slice("--path=".length);
+      if (!pathValue) {
+        throw new Error("--path requires a value.");
+      }
+      options.path = pathValue;
+      continue;
+    }
+
+    if (arg === "--path") {
+      options.path = readCliValue(argv, index, "--path");
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--home=")) {
+      const homeValue = arg.slice("--home=".length).trim();
+      if (!homeValue) {
+        throw new Error("--home requires a value.");
+      }
+      options.home = homeValue;
+      continue;
+    }
+
+    if (arg === "--home") {
+      options.home = readCliValue(argv, index, "--home").trim();
+      if (!options.home) {
+        throw new Error("--home requires a value.");
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--stall-seconds=")) {
+      options.stallSeconds = parseIntegerFlag(
+        arg.slice("--stall-seconds=".length),
+        "--stall-seconds",
+        { min: 1 },
+      );
+      continue;
+    }
+
+    if (arg === "--stall-seconds") {
+      options.stallSeconds = parseIntegerFlag(
+        readCliValue(argv, index, "--stall-seconds"),
+        "--stall-seconds",
+        { min: 1 },
+      );
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--check-interval-seconds=")) {
+      options.checkIntervalSeconds = parseIntegerFlag(
+        arg.slice("--check-interval-seconds=".length),
+        "--check-interval-seconds",
+        { min: 1 },
+      );
+      continue;
+    }
+
+    if (arg === "--check-interval-seconds") {
+      options.checkIntervalSeconds = parseIntegerFlag(
+        readCliValue(argv, index, "--check-interval-seconds"),
+        "--check-interval-seconds",
+        { min: 1 },
+      );
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--restart-delay-seconds=")) {
+      options.restartDelaySeconds = parseIntegerFlag(
+        arg.slice("--restart-delay-seconds=".length),
+        "--restart-delay-seconds",
+        { min: 0 },
+      );
+      continue;
+    }
+
+    if (arg === "--restart-delay-seconds") {
+      options.restartDelaySeconds = parseIntegerFlag(
+        readCliValue(argv, index, "--restart-delay-seconds"),
+        "--restart-delay-seconds",
+        { min: 0 },
+      );
+      index += 1;
+      continue;
+    }
+
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+
+  return options;
+}
+
 function getRepoLockPath(repoRoot: string, workflow: WorkflowConfig): string {
   return resolve(getRuntimeRoot(repoRoot, workflow), REPO_LOCK_NAME);
 }
@@ -2209,6 +2473,225 @@ function getSupervisorLockPath(
     getRuntimeRoot(repoRoot, workflow),
     `${SUPERVISOR_LOCK_PREFIX}-${sanitizePathSegment(workflow.workflowPath)}.lock`,
   );
+}
+
+function sanitizeLaunchdLabelPart(value: string): string {
+  const sanitized = sanitizePathSegment(value)
+    .replace(/^[.-]+/, "")
+    .replace(/[.-]+$/, "");
+  return sanitized || "workflow";
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function formatLaunchctlError(
+  result: LaunchctlCommandResult,
+  fallback: string,
+): string {
+  return (
+    result.error?.message ||
+    result.stderr?.trim() ||
+    result.stdout?.trim() ||
+    fallback
+  );
+}
+
+function resolveLaunchdHome(
+  options: Pick<OrchestratorLaunchdCliOptions, "home">,
+  runtime: Pick<OrchestratorLaunchdRuntimeOptions, "env" | "homeDir">,
+): string {
+  return options.home ?? runtime.env?.HOME ?? runtime.homeDir ?? homedir();
+}
+
+function resolveLaunchdPathValue(
+  options: Pick<OrchestratorLaunchdCliOptions, "path">,
+  runtime: Pick<OrchestratorLaunchdRuntimeOptions, "env">,
+): string {
+  return options.path ?? runtime.env?.PATH ?? DEFAULT_LAUNCHD_PATH;
+}
+
+function getLaunchdDomainTarget(uid: number): string {
+  return `gui/${uid}`;
+}
+
+function getLaunchdServiceTarget(uid: number, label: string): string {
+  return `${getLaunchdDomainTarget(uid)}/${label}`;
+}
+
+function resolveLaunchdUid(
+  runtime: Pick<OrchestratorLaunchdRuntimeOptions, "uid">,
+): number | null {
+  if (typeof runtime.uid === "number" && Number.isInteger(runtime.uid)) {
+    return runtime.uid;
+  }
+
+  if (typeof process.getuid === "function") {
+    const uid = process.getuid();
+    if (Number.isInteger(uid)) {
+      return uid;
+    }
+  }
+
+  return null;
+}
+
+function resolveLaunchAgentDirectory(
+  homePath: string,
+  override: string | null,
+): string {
+  const configuredPath = override ?? DEFAULT_LAUNCH_AGENT_DIR;
+  return isAbsolute(configuredPath)
+    ? configuredPath
+    : resolve(homePath, configuredPath);
+}
+
+export function buildOrchestratorLaunchdLabel(
+  repoRoot: string,
+  workflow: Pick<WorkflowConfig, "workflowPath">,
+  override: string | null = null,
+): string {
+  if (override && override.trim()) {
+    return override.trim();
+  }
+
+  return [
+    "dev",
+    "orchestrator",
+    sanitizeLaunchdLabelPart(basename(repoRoot) || "repo"),
+    sanitizeLaunchdLabelPart(workflow.workflowPath.replace(/\.[^.]+$/, "")),
+  ].join(".");
+}
+
+export function getOrchestratorLaunchdPlistPath(
+  repoRoot: string,
+  workflow: Pick<WorkflowConfig, "workflowPath">,
+  options: Pick<
+    OrchestratorLaunchdCliOptions,
+    "label" | "launchAgentDir" | "home"
+  >,
+  runtime: Pick<OrchestratorLaunchdRuntimeOptions, "env" | "homeDir"> = {},
+): string {
+  const homePath = resolveLaunchdHome(options, runtime);
+  const launchAgentDirectory = resolveLaunchAgentDirectory(
+    homePath,
+    options.launchAgentDir,
+  );
+  const label = buildOrchestratorLaunchdLabel(
+    repoRoot,
+    workflow,
+    options.label,
+  );
+  return join(launchAgentDirectory, `${label}.plist`);
+}
+
+function resolveLaunchdSupervisorScriptPath(
+  runtime: Pick<OrchestratorLaunchdRuntimeOptions, "scriptPath">,
+): string {
+  const launchdScriptPath = resolve(
+    runtime.scriptPath ?? process.argv[1] ?? "scripts/orchestrator-launchd.ts",
+  );
+  return resolve(dirname(launchdScriptPath), "orchestrator-supervisor.ts");
+}
+
+export function buildOrchestratorLaunchdPlist(
+  repoRoot: string,
+  workflow: WorkflowConfig,
+  options: Pick<
+    OrchestratorLaunchdCliOptions,
+    | "workflowFile"
+    | "label"
+    | "path"
+    | "home"
+    | "stallSeconds"
+    | "checkIntervalSeconds"
+    | "restartDelaySeconds"
+  >,
+  runtime: Pick<
+    OrchestratorLaunchdRuntimeOptions,
+    "env" | "homeDir" | "scriptPath"
+  > = {},
+): string {
+  const workflowPath = resolvePath(repoRoot, options.workflowFile);
+  const supervisorScriptPath = resolveLaunchdSupervisorScriptPath(runtime);
+  const label = buildOrchestratorLaunchdLabel(
+    repoRoot,
+    workflow,
+    options.label,
+  );
+  const pathValue = resolveLaunchdPathValue(options, runtime);
+  const homePath = resolveLaunchdHome(options, runtime);
+  const stdoutPath = getLaunchdStdoutPath(repoRoot, workflow);
+  const stderrPath = getLaunchdStderrPath(repoRoot, workflow);
+  const programArguments = [
+    process.execPath,
+    supervisorScriptPath,
+    "run",
+    "--workflow",
+    workflowPath,
+    "--stall-seconds",
+    String(options.stallSeconds),
+    "--check-interval-seconds",
+    String(options.checkIntervalSeconds),
+    "--restart-delay-seconds",
+    String(options.restartDelaySeconds),
+  ];
+
+  return [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`,
+    `<plist version="1.0">`,
+    `<dict>`,
+    `  <key>Label</key>`,
+    `  <string>${xmlEscape(label)}</string>`,
+    `  <key>ProgramArguments</key>`,
+    `  <array>`,
+    ...programArguments.map(
+      (argument) => `    <string>${xmlEscape(argument)}</string>`,
+    ),
+    `  </array>`,
+    `  <key>WorkingDirectory</key>`,
+    `  <string>${xmlEscape(repoRoot)}</string>`,
+    `  <key>RunAtLoad</key>`,
+    `  <true/>`,
+    `  <key>KeepAlive</key>`,
+    `  <dict>`,
+    `    <key>SuccessfulExit</key>`,
+    `    <false/>`,
+    `  </dict>`,
+    `  <key>EnvironmentVariables</key>`,
+    `  <dict>`,
+    `    <key>PATH</key>`,
+    `    <string>${xmlEscape(pathValue)}</string>`,
+    `    <key>HOME</key>`,
+    `    <string>${xmlEscape(homePath)}</string>`,
+    `  </dict>`,
+    `  <key>StandardOutPath</key>`,
+    `  <string>${xmlEscape(stdoutPath)}</string>`,
+    `  <key>StandardErrorPath</key>`,
+    `  <string>${xmlEscape(stderrPath)}</string>`,
+    `</dict>`,
+    `</plist>`,
+  ].join("\n");
+}
+
+function defaultRunLaunchctl(args: string[]): LaunchctlCommandResult {
+  const result = spawnSync("launchctl", args, {
+    encoding: "utf8",
+    env: process.env,
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    error: result.error ?? null,
+  };
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -4830,6 +5313,173 @@ export async function runOrchestratorSupervisorCli(
     }
 
     return await runOrchestratorSupervisor(options, runtime);
+  } catch (caughtError) {
+    error(
+      caughtError instanceof Error ? caughtError.message : String(caughtError),
+    );
+    return 1;
+  }
+}
+
+function requireLaunchdInstallSupport(
+  runtime: Pick<OrchestratorLaunchdRuntimeOptions, "platform" | "uid">,
+): number {
+  const platform = runtime.platform ?? process.platform;
+  if (platform !== "darwin") {
+    throw new Error(
+      "launchd install and uninstall are only supported on macOS. The core worker and supervisor CLIs remain cross-platform.",
+    );
+  }
+
+  const uid = resolveLaunchdUid(runtime);
+  if (uid === null || uid < 0) {
+    throw new Error(
+      "Could not determine the current macOS user id for launchctl.",
+    );
+  }
+
+  return uid;
+}
+
+function runOrchestratorLaunchdPrint(
+  options: OrchestratorLaunchdCliOptions,
+  runtime: OrchestratorLaunchdRuntimeOptions = {},
+): number {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const repoRoot = runtime.repoRoot ? resolve(runtime.repoRoot) : process.cwd();
+  const workflow = loadWorkflow(repoRoot, options.workflowFile);
+
+  log(buildOrchestratorLaunchdPlist(repoRoot, workflow, options, runtime));
+  return 0;
+}
+
+function installOrchestratorLaunchd(
+  options: OrchestratorLaunchdCliOptions,
+  runtime: OrchestratorLaunchdRuntimeOptions = {},
+): number {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const repoRoot = runtime.repoRoot ? resolve(runtime.repoRoot) : process.cwd();
+  const workflow = loadWorkflow(repoRoot, options.workflowFile);
+  const uid = requireLaunchdInstallSupport(runtime);
+  const label = buildOrchestratorLaunchdLabel(
+    repoRoot,
+    workflow,
+    options.label,
+  );
+  const plistPath = getOrchestratorLaunchdPlistPath(
+    repoRoot,
+    workflow,
+    {
+      label: options.label,
+      launchAgentDir: options.launchAgentDir,
+      home: options.home,
+    },
+    runtime,
+  );
+  const stdoutPath = getLaunchdStdoutPath(repoRoot, workflow);
+  const stderrPath = getLaunchdStderrPath(repoRoot, workflow);
+  const launchctl = runtime.runLaunchctl ?? defaultRunLaunchctl;
+  const domainTarget = getLaunchdDomainTarget(uid);
+
+  ensureDirectory(dirname(plistPath));
+  ensureDirectory(dirname(stdoutPath));
+  ensureDirectory(dirname(stderrPath));
+  writeFileSync(
+    plistPath,
+    buildOrchestratorLaunchdPlist(repoRoot, workflow, options, runtime) + "\n",
+  );
+
+  launchctl(["bootout", domainTarget, plistPath]);
+
+  const bootstrapResult = launchctl(["bootstrap", domainTarget, plistPath]);
+  if (bootstrapResult.status !== 0) {
+    throw new Error(
+      `Failed to bootstrap launchd agent ${label}: ${formatLaunchctlError(bootstrapResult, "launchctl bootstrap failed")}`,
+    );
+  }
+
+  const kickstartResult = launchctl([
+    "kickstart",
+    "-k",
+    getLaunchdServiceTarget(uid, label),
+  ]);
+  if (kickstartResult.status !== 0) {
+    throw new Error(
+      `Failed to kickstart launchd agent ${label}: ${formatLaunchctlError(kickstartResult, "launchctl kickstart failed")}`,
+    );
+  }
+
+  log(
+    `Installed launchd agent ${label} for ${workflow.name}. Plist: ${plistPath}. Logs: ${stdoutPath} and ${stderrPath}.`,
+  );
+  return 0;
+}
+
+function uninstallOrchestratorLaunchd(
+  options: OrchestratorLaunchdCliOptions,
+  runtime: OrchestratorLaunchdRuntimeOptions = {},
+): number {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const repoRoot = runtime.repoRoot ? resolve(runtime.repoRoot) : process.cwd();
+  const workflow = loadWorkflow(repoRoot, options.workflowFile);
+  const uid = requireLaunchdInstallSupport(runtime);
+  const label = buildOrchestratorLaunchdLabel(
+    repoRoot,
+    workflow,
+    options.label,
+  );
+  const plistPath = getOrchestratorLaunchdPlistPath(
+    repoRoot,
+    workflow,
+    {
+      label: options.label,
+      launchAgentDir: options.launchAgentDir,
+      home: options.home,
+    },
+    runtime,
+  );
+  const launchctl = runtime.runLaunchctl ?? defaultRunLaunchctl;
+
+  launchctl(["bootout", getLaunchdDomainTarget(uid), plistPath]);
+  rmSync(plistPath, { force: true });
+
+  log(`Removed launchd agent ${label}. Plist: ${plistPath}.`);
+  return 0;
+}
+
+export function runOrchestratorLaunchdCli(
+  argv: string[],
+  runtime: OrchestratorLaunchdRuntimeOptions = {},
+): number {
+  const log = runtime.log ?? ((message: string) => console.log(message));
+  const error = runtime.error ?? ((message: string) => console.error(message));
+
+  let options: OrchestratorLaunchdCliOptions;
+  try {
+    options = parseOrchestratorLaunchdCliArgs(argv);
+  } catch (caughtError) {
+    error(
+      caughtError instanceof Error ? caughtError.message : String(caughtError),
+    );
+    error(formatOrchestratorLaunchdCliUsage());
+    return 1;
+  }
+
+  if (options.help) {
+    log(formatOrchestratorLaunchdCliUsage());
+    return 0;
+  }
+
+  try {
+    if (options.command === "install") {
+      return installOrchestratorLaunchd(options, runtime);
+    }
+
+    if (options.command === "uninstall") {
+      return uninstallOrchestratorLaunchd(options, runtime);
+    }
+
+    return runOrchestratorLaunchdPrint(options, runtime);
   } catch (caughtError) {
     error(
       caughtError instanceof Error ? caughtError.message : String(caughtError),

@@ -83,3 +83,15 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The standalone repo needed automatic worker restarts plus a clear operator start/stop/status flow, but adding a daemon framework or new workflow configuration surface would make the extracted repo heavier than intended.
 - Decision: Add a separate `scripts/orchestrator-supervisor.ts` CLI with `run`, `start`, `stop`, and `status` commands, keep one supervisor lock and `supervisor-status.json` under the workflow runtime root, and detect stalls by polling `status.json` with a fallback to `heartbeat.json` while honoring `waitingUntil` for intentional sleeps.
 - Impact: Operators can run one local supervisor per workflow without external services, dead or stalled workers restart automatically, and repos gain a durable supervision artifact; the stall timeout still needs to stay above the longest expected uninterrupted task run because worker heartbeats only advance at loop transitions.
+
+## 2026-03-10 - ORCH-045 - Keep `launchd` as a thin wrapper around the supervisor
+
+- Context: macOS operators need a low-friction way to keep the standalone orchestrator alive across login sessions, but the core worker loop should not grow platform-specific service-management behavior.
+- Decision: Add a separate `scripts/orchestrator-launchd.ts` helper that prints, installs, and uninstalls a user LaunchAgent plist for the existing supervisor, with absolute program arguments plus explicit `PATH` and `HOME` environment injection.
+- Impact: macOS users can adopt `launchd` without hand-editing plist XML, while non-macOS workflows and the core loop stay unchanged because the platform-specific behavior lives behind an optional helper.
+
+## 2026-03-10 - ORCH-045 - Serialize worker tool calls in orchestrator prompts
+
+- Context: A live `ORCH-045` worker finished the code changes and validations, then stalled without emitting `TASK_DONE` after issuing multiple shell-tool calls in the same turn.
+- Decision: Add an explicit prompt rule for both task execution and review passes that requires developer tool calls to run serially, one at a time.
+- Impact: Future workers are less likely to deadlock on missing parallel tool responses, and operator intervention should become rarer during long autonomous runs.
