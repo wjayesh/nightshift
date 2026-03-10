@@ -475,12 +475,14 @@ Run the standalone orchestrator against a realistic, dependency-heavy fixture to
 ### 5.2 Dogfood supervised restart behavior on the standalone fixture
 
 - **ID**: `ORCH-049`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P1
 - **Depends on**: ORCH-044, ORCH-045, ORCH-048
 - **Notes**:
   - 2026-03-10: ORCH-048 validated the worker loop through `bun test tests/integration/orchestrator-dogfood.test.ts`, but that fixture runs the worker directly and never invokes `scripts/orchestrator-supervisor.ts` or `scripts/orchestrator-launchd.ts`.
   - 2026-03-10: Reproduction: rerun the dogfood fixture and note that review, retry, and stale-workspace behavior are covered while dead-worker restart, stall detection, and the `launchd` wrapper still require separate live-process drills.
+  - 2026-03-10: Added `tests/integration/orchestrator-supervised-dogfood.test.ts`, which runs a temp repo through `scripts/orchestrator-supervisor.ts`, kills one sleeping worker, stalls one live task through runtime `status.json`, and verifies `supervisor-status.json` plus the final task and decision artifacts.
+  - 2026-03-10: Updated `docs/standalone-orchestrator-dogfood.md` with the supervised drill results, including the remaining operator caveat about choosing a stall timeout above the longest uninterrupted agent step and the fact that real macOS `launchd` install/uninstall stays optional manual validation.
 
 Run the dogfood fixture under the standalone supervisor and optional macOS wrapper so restart behavior is validated against real runtime files rather than only unit tests.
 

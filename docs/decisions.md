@@ -125,3 +125,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: Running ORCH-048 directly in the shared repo would mutate the live standalone task tracker and runtime artifacts, but the acceptance criteria needed repeatable review, retry, and stale-workspace scenarios with controlled failures.
 - Decision: Validate the task with an automated temp git repo fixture that calls the real standalone CLI, runs in `git_worktree` mode, and scripts deterministic task/review behavior for decision logging, retry backoff, and stale-workspace refresh.
 - Impact: The worker loop can now be replayed locally or in CI without polluting the main checkout, operator notes can point to one canonical dogfood command, and supervised restart coverage stays an explicit follow-up instead of being mixed into worker-loop validation.
+
+## 2026-03-10 - ORCH-049 - Dogfood supervisor restarts in a separate live fixture
+
+- Context: ORCH-048 proved the standalone worker loop, but it never invoked the real supervisor or wrapper, and a true macOS `launchd` install/uninstall cycle is not portable enough for the default automated test path.
+- Decision: Add a second temp-repo integration fixture that runs the real supervisor, forces one external worker kill plus one hanging task so restart reasons come from live `status.json` polling, and keep the `launchd` surface cross-platform by validating plist generation while documenting install/uninstall as optional manual work.
+- Impact: Supervisor restart behavior is now replayable in CI and local drills without mutating the shared repo, operator notes point to a dedicated supervised dogfood command, and macOS service loading stays a documented follow-up instead of a required cross-platform test.
