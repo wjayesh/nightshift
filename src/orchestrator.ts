@@ -800,6 +800,25 @@ export function mergeTaskUniverses(...taskLists: Task[][]): Task[] {
   return merged;
 }
 
+function getReviewRemediationTaskIdPrefix(reviewId: string) {
+  const reviewMatch = reviewId.match(/^review-(\d+)$/i);
+  if (reviewMatch) {
+    return `REVIEW-${reviewMatch[1]}-`;
+  }
+
+  const sanitized = reviewId
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${sanitized || "REVIEW"}-`;
+}
+
+function isReviewRemediationTask(task: Pick<Task, "id">): boolean {
+  return /^REVIEW-\d+-\d+$/.test(task.id);
+}
+
 function priorityRank(priority: TaskPriority): number {
   return priority === "unscored" ? 999 : Number(priority.slice(1));
 }
@@ -835,9 +854,14 @@ export function selectNextTask(
   readyTasks.sort((left, right) => {
     const priorityDifference =
       priorityRank(left.priority) - priorityRank(right.priority);
+    const remediationDifference =
+      Number(!isReviewRemediationTask(left)) -
+      Number(!isReviewRemediationTask(right));
     return priorityDifference !== 0
       ? priorityDifference
-      : left.sortIndex - right.sortIndex;
+      : remediationDifference !== 0
+        ? remediationDifference
+        : left.sortIndex - right.sortIndex;
   });
 
   return readyTasks[0] ?? null;
@@ -1404,6 +1428,7 @@ function buildReviewPrompt(
   reviewedTasks: ReviewTaskContext[],
   workspacePath: string,
 ): string {
+  const remediationIdPrefix = getReviewRemediationTaskIdPrefix(reviewId);
   const instructionList =
     config.instructionFiles.length > 0
       ? config.instructionFiles.map((file) => `- ${file}`).join("\n")
@@ -1461,11 +1486,14 @@ function buildReviewPrompt(
     `1. Review the ${reviewedTasks.length} completed task${reviewedTasks.length === 1 ? "" : "s"} listed above together before changing anything.`,
     "2. Inspect the current repo state, task docs, and relevant validations as needed to confirm the finished work still matches its acceptance criteria.",
     "3. If you find missed acceptance criteria, regressions, or follow-up work that must happen soon, add remediation task entries directly to the relevant task doc.",
-    "4. Any remediation task you create must start as `pending` and use `Priority: P0`.",
-    "5. Follow the existing task-doc format (`ID`, `Status`, `Priority`, `Depends on`) so the scheduler can pick the new work up.",
-    "6. Issue developer tool calls serially; do not start a second shell or file-edit command until the previous tool call has returned.",
-    "7. Do not edit the orchestrator runtime progress/state files directly; the orchestrator records the review outcome for you.",
-    "8. Start your final message with `REVIEW_DONE:` and list any remediation task IDs you created.",
+    `4. Remediation task IDs must use \`${remediationIdPrefix}01\`, \`${remediationIdPrefix}02\`, and so on.`,
+    "5. Append review-created tasks as a contiguous block at the end of the task doc you add them to.",
+    "6. Any remediation task you create must start as `pending`, use `Priority: P0`, and list only reviewed task IDs in `Depends on`.",
+    "7. Do not make remediation tasks depend on the synthetic review task or unrelated unfinished work.",
+    "8. Follow the existing task-doc format (`ID`, `Status`, `Priority`, `Depends on`) so the scheduler can pick the new work up.",
+    "9. Issue developer tool calls serially; do not start a second shell or file-edit command until the previous tool call has returned.",
+    "10. Do not edit the orchestrator runtime progress/state files directly; the orchestrator records the review outcome for you.",
+    "11. Start your final message with `REVIEW_DONE:` and list any remediation task IDs you created.",
   ].join("\n");
 }
 
@@ -3778,9 +3806,22 @@ function findReviewRemediationTasks(beforeTasks: Task[], afterTasks: Task[]) {
 
 function validateReviewRemediationTasks(
   reviewId: string,
+  reviewedTaskIds: string[],
+  afterTasks: Task[],
   remediationTasks: Task[],
 ) {
+  const expectedPrefix = getReviewRemediationTaskIdPrefix(reviewId);
+  const reviewedTaskIdSet = new Set(reviewedTaskIds);
+  const remediationTaskIds = new Set(remediationTasks.map((task) => task.id));
+
   for (const task of remediationTasks) {
+    const suffix = task.id.slice(expectedPrefix.length);
+    if (!task.id.startsWith(expectedPrefix) || !/^\d+$/.test(suffix)) {
+      throw new Error(
+        `${reviewId} created remediation task ${task.id} with an invalid ID. Review-created tasks must use IDs like ${expectedPrefix}01.`,
+      );
+    }
+
     if (task.status !== "pending") {
       throw new Error(
         `${reviewId} created remediation task ${task.id} with status ${task.status}. Review-created tasks must start as pending.`,
@@ -3791,6 +3832,42 @@ function validateReviewRemediationTasks(
       throw new Error(
         `${reviewId} created remediation task ${task.id} with priority ${task.priority}. Review-created tasks must use Priority P0.`,
       );
+    }
+
+    if (task.dependsOn.length === 0) {
+      throw new Error(
+        `${reviewId} created remediation task ${task.id} without reviewed-task dependencies. Review-created tasks must depend on one or more reviewed task IDs.`,
+      );
+    }
+
+    const invalidDependency = task.dependsOn.find(
+      (dependencyId) => !reviewedTaskIdSet.has(dependencyId),
+    );
+    if (invalidDependency) {
+      throw new Error(
+        `${reviewId} created remediation task ${task.id} with dependency ${invalidDependency}. Review-created tasks may depend only on reviewed task IDs: ${reviewedTaskIds.join(", ")}.`,
+      );
+    }
+  }
+
+  for (const filePath of new Set(
+    remediationTasks.map((task) => task.filePath),
+  )) {
+    const fileTasks = afterTasks.filter((task) => task.filePath === filePath);
+    let seenRemediationTask = false;
+
+    for (const task of fileTasks) {
+      const isRemediationTask = remediationTaskIds.has(task.id);
+      if (isRemediationTask) {
+        seenRemediationTask = true;
+        continue;
+      }
+
+      if (seenRemediationTask) {
+        throw new Error(
+          `${reviewId} inserted remediation tasks into ${filePath} before existing tasks. Review-created tasks must be appended as a contiguous block at the end of the task doc.`,
+        );
+      }
     }
   }
 }
@@ -4077,7 +4154,12 @@ function executeReviewPass(params: {
       actionableTasks,
       reviewWorkspaceTasks,
     );
-    validateReviewRemediationTasks(reviewId, remediationTasks);
+    validateReviewRemediationTasks(
+      reviewId,
+      reviewedTasks.map((entry) => entry.task.id),
+      reviewWorkspaceTasks,
+      remediationTasks,
+    );
     const reviewedAt = new Date().toISOString();
     const summary = summarizeMessage(
       runResult.lastMessage,

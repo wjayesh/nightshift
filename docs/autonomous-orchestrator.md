@@ -32,7 +32,7 @@ Mahilo now uses an in-repo autonomous development loop inspired by Symphony, but
 9. Acquire a short repo-level lock only for integration-branch mutation.
 10. Cherry-pick the new task-branch commit(s) into the shared integration branch.
 11. Auto-push after every configured commit threshold, and on final completion.
-12. After every configured batch of completed tasks, run a review pass against the last batch and let the reviewer add high-priority remediation tasks when needed.
+12. After every configured batch of completed tasks, run a review pass against the last batch and let the reviewer add high-priority remediation tasks when needed, using review-scoped IDs, end-of-doc insertion, and dependencies on the reviewed tasks only.
 13. Re-read the task docs on the integration branch to see whether the task moved to `done`, `blocked`, or remains active.
 14. Repeat until all tracked tasks are complete or the loop limit is reached.
 

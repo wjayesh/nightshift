@@ -145,7 +145,8 @@ Expected behavior:
 - after every N completed implementation tasks, start a review pass
 - the reviewer inspects the last N completed tasks
 - review findings create follow-up task(s) when acceptance criteria or behavior were missed
-- review-created tasks enter the queue at high priority
+- review-created tasks use review-scoped IDs, append predictably into task docs, and depend only on the reviewed tasks they remediate
+- the scheduler prefers review-created tasks over other same-priority ready work
 
 ### Git Integration Cadence
 

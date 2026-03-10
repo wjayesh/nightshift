@@ -189,6 +189,32 @@ describe("task parsing and selection", () => {
     expect(selectNextTask(tasks, null)?.id).toBe("TASK-001");
   });
 
+  it("prefers review remediation tasks over other ready work at the same priority", () => {
+    const tasks = parseTaskFile(
+      `### Reviewed Task
+- **ID**: \`TASK-001\`
+- **Status**: \`done\`
+- **Priority**: P0
+- **Depends on**: None
+
+### Existing Ready Task
+- **ID**: \`TASK-010\`
+- **Status**: \`pending\`
+- **Priority**: P0
+- **Depends on**: None
+
+### Review Follow-up
+- **ID**: \`REVIEW-001-01\`
+- **Status**: \`pending\`
+- **Priority**: P0
+- **Depends on**: TASK-001
+`,
+      "docs/sample.md",
+    );
+
+    expect(selectNextTask(tasks, null)?.id).toBe("REVIEW-001-01");
+  });
+
   it("uses dependency sources to unlock cross-doc tasks", () => {
     const pluginTasks = parseTaskFile(
       `### Plugin Task\n- **ID**: \`PLG-001\`\n- **Status**: \`pending\`\n- **Priority**: P0\n- **Depends on**: SRV-001\n`,

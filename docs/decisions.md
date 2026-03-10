@@ -42,6 +42,12 @@ Use this file to record consequential implementation decisions that should stay 
 - Decision: Add a `review_every_tasks` workflow field, track reviewed completion batches in the persisted state, build review prompts from the next unreviewed batch of completed tasks plus their saved last messages, and let the review pass create `P0` remediation tasks directly in the task docs.
 - Impact: Standalone workflows now have an explicit review cadence with durable state/progress artifacts and review-generated follow-up work, while older Mahilo-specific workflows can keep review automation disabled by setting `review_every_tasks: 0`.
 
+## 2026-03-10 - ORCH-031 - Make review-created tasks review-scoped and immediately ready
+
+- Context: ORCH-030 let reviews add `P0` remediation tasks, but without a naming scheme, insertion rule, or tie-break policy those follow-ups could look ad hoc and compete ambiguously with ordinary backlog work.
+- Decision: Require review-created tasks to use `REVIEW-<review-number>-<sequence>` IDs, append them as a contiguous block at the end of a task doc, restrict `Depends on` to the reviewed task IDs, and have the scheduler prefer those remediation tasks over other same-priority ready work.
+- Impact: Review follow-ups are now easy to trace back to a specific review pass, task-doc insertion stays predictable, and urgent remediation work is picked up promptly without adding a second queueing system.
+
 ## 2026-03-10 - ORCH-040 - Keep one long-lived worker lock per workflow file
 
 - Context: The standalone loop already had a short-lived `repo.lock` for integration, but it could still start duplicate workers for the same workflow in one repo clone, and the lock location needed to follow workflow runtime configuration instead of repo-specific names.

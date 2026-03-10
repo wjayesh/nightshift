@@ -193,6 +193,8 @@ Scheduling rules are straightforward:
 - The orchestrator reads every configured `task_sources` file.
 - It ignores tasks whose dependencies are not yet `done`.
 - It can also gate tasks on other docs listed in `dependency_sources`.
+- Review-created remediation tasks use `REVIEW-<review>-<n>` IDs, stay
+  `pending` + `P0`, and win same-priority ties over ordinary ready tasks.
 - It keeps working the current active task until that task reaches a terminal
   state or the agent exits without completing it.
 
@@ -380,6 +382,12 @@ The built-in behavior is:
 - inspect the last 3 completed tasks together
 - create new high-priority follow-up tasks if acceptance criteria or behavior
   were missed
+- use review-scoped follow-up IDs such as `REVIEW-001-01`
+- append review-created tasks as a contiguous block at the end of the relevant
+  task doc
+- list only reviewed task IDs in `Depends on` so the follow-up stays traceable
+  and ready immediately
+- prefer review-created follow-up tasks over other same-priority ready work
 - persist the outcome in `.orchestrator/state.json`,
   `.orchestrator/progress.md`, a review log such as `.orchestrator/reviews.md`,
   and a per-review last-message file such as

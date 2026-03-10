@@ -240,9 +240,12 @@ Add a built-in review pass that runs after a configurable number of completed ta
 ### 3.2 Define review-created task behavior
 
 - **ID**: `ORCH-031`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P1
 - **Depends on**: ORCH-030
+- **Notes**:
+  - 2026-03-10: Defined review-created remediation tasks around `REVIEW-<review-number>-<sequence>` IDs, end-of-doc insertion, reviewed-task-only dependencies, and same-priority scheduler preference.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-review-loop.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check src/orchestrator.ts tests/unit/orchestrator.test.ts tests/unit/orchestrator-review-loop.test.ts README.md docs/standalone-orchestrator-prd.md docs/autonomous-orchestrator.md docs/decisions.md docs/tasks-standalone-orchestrator.md`.
 
 Define how reviewer-created follow-up tasks are inserted and prioritized.
 
