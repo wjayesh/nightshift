@@ -113,3 +113,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The standalone repo now has the individual hardening pieces from ORCH-040 through ORCH-047, but the product docs still described crash hardening as deferred and did not spell out how the layers fit together.
 - Decision: Document crash hardening as one local recovery model: fail fast on duplicate workers, keep non-terminal failures `pending` with durable retry/backoff state, refresh stale task workspaces from the latest integration branch, keep terminal tracker status updates on the orchestrator, and use runtime health artifacts plus a separate supervisor for process restarts.
 - Impact: Operators can understand restart and failure behavior from the repo docs alone, copied repos inherit a concrete supervision model without adding external infrastructure, and future hardening work can extend the same runtime artifacts instead of introducing a parallel recovery system.
+
+## 2026-03-10 - ORCH-033 - Keep waiting as a derived pending state
+
+- Context: The standalone docs still described `blocked` as generic waiting, but the runtime already kept retries `pending` and only used `TASK_BLOCKED` for terminal outcomes, which made dependency waits ambiguous.
+- Decision: Define dependency waits and retry waits as derived `pending` states surfaced through runtime notes and status artifacts, reserve `blocked` for terminal or manual-intervention outcomes, and treat `dependency_sources` as read-only upstream gates that never schedule work in the current workflow.
+- Impact: Operators can distinguish “not ready yet” from true blockage, cross-project dependencies stay one-way and repo-native, and idle runtime notes now explain when the loop is waiting on local, external, or unresolved dependencies.

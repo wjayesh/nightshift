@@ -91,7 +91,7 @@ The standalone repo should explicitly avoid:
 - introducing heavy remote infrastructure or managed services
 - running multiple active implementation tasks within a single workflow by default
 - turning crash recovery or supervision into a hosted control plane
-- solving richer cross-project waiting semantics in v1
+- introducing bidirectional cross-project coordination or remote waiting queues
 
 These can be added later only if they materially improve the copy-into-repo product without turning it into a platform.
 
@@ -121,6 +121,15 @@ Task docs are plain markdown sections with minimal metadata:
 - `Depends on`
 
 This format should remain simple enough to edit by hand.
+
+### Waiting Semantics
+
+Waiting should stay explicit without introducing another task-doc status.
+
+- `pending` is the only non-terminal queue state. A `pending` task may be ready now, waiting on unmet `Depends on`, or waiting for a scheduled retry.
+- `blocked` is reserved for terminal or manual-intervention outcomes, not ordinary dependency waits.
+- `dependency_sources` are read-only prerequisite docs. They can delay tasks in `task_sources`, but this workflow does not dispatch or mutate tasks from those docs.
+- Runtime artifacts should explain why the loop is idle, including local dependency waits, external dependency waits, unresolved dependency IDs, and retry backoff windows.
 
 ### Runtime Artifacts
 
@@ -187,7 +196,7 @@ The following are intentionally deferred to later tasks:
 
 - final repo and folder layout
 - exact CLI surface
-- richer waiting semantics for dependencies outside the current repo
+- automatic cross-project wake-ups or upstream task dispatch for dependencies outside the current repo
 
 ## Crash Hardening Strategy
 

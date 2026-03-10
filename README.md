@@ -145,7 +145,8 @@ Important front matter fields:
   update inside the assigned task section. The orchestrator, not the worker,
   owns terminal `Status` line changes.
 - `dependency_sources`: optional docs used only to satisfy `Depends on`
-  references across other files.
+  references across other files. They are read-only prerequisite docs for this
+  workflow, not another actionable queue.
 - `instruction_files`: repo docs that must be read before the task section.
 - `decision_file`: markdown log for consequential implementation choices.
 - `progress_file` and `state_file`: durable runtime memory. `state_file` also
@@ -184,21 +185,36 @@ artifacts, and how to copy the repo into a new project.
 
 Supported status values are:
 
-- `pending`
-- `in-progress`
-- `review`
-- `blocked`
-- `done`
+- `pending`: not started yet, waiting on unmet dependencies, or waiting for a
+  scheduled retry.
+- `in-progress`: currently assigned to the worker.
+- `review`: held for a repo-defined review queue; the default scheduler does
+  not auto-start it.
+- `blocked`: terminal or manual-intervention outcome only.
+- `done`: finished and integrated.
 
 Scheduling rules are straightforward:
 
 - The orchestrator reads every configured `task_sources` file.
-- It ignores tasks whose dependencies are not yet `done`.
-- It can also gate tasks on other docs listed in `dependency_sources`.
+- It ignores `pending` tasks whose dependencies are not yet `done`; those tasks
+  stay `pending` and are surfaced as waiting in runtime notes.
+- It can also gate tasks on other docs listed in `dependency_sources`, but
+  those docs are read-only prerequisites for this workflow.
 - Review-created remediation tasks use `REVIEW-<review>-<n>` IDs, stay
   `pending` + `P0`, and win same-priority ties over ordinary ready tasks.
 - It keeps working the current active task until that task reaches a terminal
   state or the agent exits without completing it.
+
+Waiting behavior stays explicit without adding a separate `waiting` status:
+
+- Unmet `Depends on` keeps a task `pending`.
+- Retry backoff keeps a task `pending` and visible in `state.json` and
+  `status.json`.
+- `blocked` is reserved for `TASK_BLOCKED` or deliberate human intervention,
+  not ordinary dependency waits.
+- Cross-project waits are one-way: local `task_sources` may wait on
+  `dependency_sources`, but this workflow never schedules work from those
+  dependency docs.
 
 The goal is to keep task editing cheap. If a human can edit the markdown by
 hand, the orchestrator should still understand it.
@@ -255,7 +271,8 @@ The most useful fields are:
 
 - `phase`, `activeTaskId`, `iteration`, and `heartbeatAt`: what the worker is
   doing right now and how fresh that signal is.
-- `lastNote` and `lastError`: the last normal transition or failure summary.
+- `lastNote` and `lastError`: the last normal transition or failure summary,
+  including idle notes about dependency waits and retry waits.
 - `retry`: per-task retry records plus `waitingTaskIds`, `exhaustedTaskIds`,
   and the next scheduled retry time.
 - `waitingUntil`: when a sleeping worker expects to wake up for the next poll

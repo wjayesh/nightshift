@@ -279,9 +279,11 @@ Add restart-friendly supervision for long-running loops.
 ### 3.4 Add richer waiting semantics
 
 - **ID**: `ORCH-033`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P1
 - **Depends on**: ORCH-014
+- **Notes**:
+  - 2026-03-10: Defined waiting as a derived `pending` state, reserved `blocked` for terminal/manual-intervention outcomes, clarified `dependency_sources` as one-way read-only prerequisite docs, and surfaced dependency waits in idle runtime notes.
 
 Design explicit waiting semantics for dependencies that cannot run yet.
 

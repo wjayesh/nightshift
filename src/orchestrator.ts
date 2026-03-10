@@ -823,10 +823,17 @@ function priorityRank(priority: TaskPriority): number {
   return priority === "unscored" ? 999 : Number(priority.slice(1));
 }
 
-function isReady(task: Task, taskMap: Map<string, Task>): boolean {
-  return task.dependsOn.every(
-    (dependencyId) => taskMap.get(dependencyId)?.status === "done",
+function getUnmetDependencyIds(
+  task: Pick<Task, "dependsOn">,
+  taskMap: Map<string, Task>,
+): string[] {
+  return task.dependsOn.filter(
+    (dependencyId) => taskMap.get(dependencyId)?.status !== "done",
   );
+}
+
+function isReady(task: Task, taskMap: Map<string, Task>): boolean {
+  return getUnmetDependencyIds(task, taskMap).length === 0;
 }
 
 export function selectNextTask(
@@ -3726,10 +3733,29 @@ export function writeRuntimeHealth(
 
 function buildIdleNote(
   tasks: Task[],
+  dependencyUniverse: Task[],
   workflow: Pick<WorkflowConfig, "taskFailureRetryLimit">,
   state: Pick<OrchestratorState, "taskFailures">,
   now = new Date(),
 ) {
+  const actionableTaskIds = new Set(tasks.map((task) => task.id));
+  const dependencyTaskMap = new Map(
+    dependencyUniverse.map((task) => [task.id, task]),
+  );
+  const dependencyWaitingTasks = tasks
+    .filter((task) => task.status === "pending")
+    .map((task) => ({
+      task,
+      unmetDependencyIds: getUnmetDependencyIds(task, dependencyTaskMap),
+    }))
+    .filter(({ unmetDependencyIds }) => unmetDependencyIds.length > 0)
+    .sort((left, right) => {
+      const priorityDifference =
+        priorityRank(left.task.priority) - priorityRank(right.task.priority);
+      return priorityDifference !== 0
+        ? priorityDifference
+        : left.task.sortIndex - right.task.sortIndex;
+    });
   const waitingTasks = tasks
     .map((task) => ({
       task,
@@ -3753,6 +3779,25 @@ function buildIdleNote(
       isTaskRetryExhausted(workflow, taskFailure ?? null),
     );
   const notes = ["No ready tasks."];
+
+  if (dependencyWaitingTasks.length > 0) {
+    const firstWaiting = dependencyWaitingTasks[0];
+    const firstDependencyId = firstWaiting.unmetDependencyIds[0];
+    const dependencyLabel = !dependencyTaskMap.has(firstDependencyId)
+      ? "unresolved dependency"
+      : actionableTaskIds.has(firstDependencyId)
+        ? "dependency"
+        : "external dependency";
+    const extraWaiting =
+      dependencyWaitingTasks.length > 1
+        ? ` (+${dependencyWaitingTasks.length - 1} more task${
+            dependencyWaitingTasks.length === 2 ? "" : "s"
+          } waiting on dependencies)`
+        : "";
+    notes.push(
+      `Waiting on ${dependencyLabel} ${firstDependencyId} for ${firstWaiting.task.id}.${extraWaiting}`,
+    );
+  }
 
   if (waitingTasks.length > 0) {
     const firstWaiting = waitingTasks[0];
@@ -4621,7 +4666,13 @@ export function runOrchestratorLoop(
 
         if (!task) {
           state.activeTaskId = null;
-          const idleNote = buildIdleNote(actionable, workflow, state, now);
+          const idleNote = buildIdleNote(
+            actionable,
+            taskUniverse,
+            workflow,
+            state,
+            now,
+          );
           appendProgress(repoRoot, workflow, [
             formatHistoryNote(null, "idle", idleNote),
           ]);

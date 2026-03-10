@@ -321,4 +321,85 @@ fs.writeFileSync(
     });
     expect(heartbeat.lastNote).toContain("All tracked tasks are complete.");
   });
+
+  it("reports dependency waits in runtime status when no task is ready", () => {
+    const repoRoot = createTempRepo();
+    mkdirSync(join(repoRoot, "docs"), { recursive: true });
+    writeFileSync(
+      join(repoRoot, "docs/tasks.md"),
+      `### Wait On External Dependency
+- **ID**: \`APP-001\`
+- **Status**: \`pending\`
+- **Priority**: P0
+- **Depends on**: CORE-001
+`,
+    );
+    writeFileSync(
+      join(repoRoot, "docs/dependencies.md"),
+      `### External Dependency
+- **ID**: \`CORE-001\`
+- **Status**: \`pending\`
+- **Priority**: P0
+- **Depends on**: None
+`,
+    );
+    writeFileSync(
+      join(repoRoot, "WORKFLOW.md"),
+      [
+        "---",
+        "name: dependency-wait-health",
+        "task_sources:",
+        "  - docs/tasks.md",
+        "dependency_sources:",
+        "  - docs/dependencies.md",
+        "progress_file: .orchestrator/runtime/progress.md",
+        "state_file: .orchestrator/runtime/state.json",
+        "workspace_root: .orchestrator/runtime/workspaces",
+        "workspace_mode: shared",
+        "max_iterations: 1",
+        "poll_interval_seconds: 0",
+        "completion_phrase: COMPLETE",
+        "review_every_tasks: 0",
+        "auto_push_every_commits: 0",
+        "---",
+        "# Workflow",
+        "Wait for upstream work before selecting a task.",
+        "",
+      ].join("\n"),
+    );
+
+    const exitCode = runOrchestratorLoop(
+      {
+        workflowFile: "WORKFLOW.md",
+        once: true,
+        dryRun: false,
+      },
+      {
+        repoRoot,
+        log: () => undefined,
+        error: () => undefined,
+        sleep: () => undefined,
+      },
+    );
+    const statusPath = join(repoRoot, ".orchestrator/runtime/status.json");
+    const progressPath = join(repoRoot, ".orchestrator/runtime/progress.md");
+    const status = JSON.parse(readFileSync(statusPath, "utf8")) as {
+      phase: string;
+      activeTaskId: string | null;
+      lastNote: string | null;
+    };
+
+    expect(exitCode).toBe(0);
+    expect(status).toMatchObject({
+      phase: "idle",
+      activeTaskId: null,
+    });
+    expect(status.lastNote).toContain("No ready tasks.");
+    expect(status.lastNote).toContain(
+      "Waiting on external dependency CORE-001 for APP-001.",
+    );
+    expect(readFileSync(progressPath, "utf8")).toContain(
+      "Waiting on external dependency CORE-001 for APP-001.",
+    );
+  });
 });

@@ -23,7 +23,7 @@ Mahilo now uses an in-repo autonomous development loop inspired by Symphony, but
 
 1. Load a workflow file.
 2. Parse task docs for task IDs, statuses, priorities, and dependencies.
-3. Optionally parse separate dependency sources to gate tasks on external prerequisites.
+3. Optionally parse separate dependency sources as read-only docs to gate tasks on external prerequisites.
 4. Pick the next ready task.
 5. Create or reuse a task-specific git worktree branch.
 6. Run `codex exec` with the workflow prompt plus the assigned task section.
@@ -37,6 +37,14 @@ Mahilo now uses an in-repo autonomous development loop inspired by Symphony, but
 14. After every configured batch of completed tasks, run a review pass against the last batch and let the reviewer add high-priority remediation tasks when needed, using review-scoped IDs, end-of-doc insertion, and dependencies on the reviewed tasks only.
 15. Re-read the task docs on the integration branch to see whether the task moved to `done`, `blocked`, or remains active.
 16. Repeat until all tracked tasks are complete or the loop limit is reached.
+
+## Waiting Semantics
+
+- Unmet `Depends on` keeps a task `pending`; waiting is derived from readiness, not a separate task-doc status.
+- `dependency_sources` are read-only prerequisites. They can block current workflow tasks, but the current workflow never dispatches or rewrites those external tasks.
+- Agent, runtime, and integration retry backoff also keep tasks `pending`.
+- `blocked` is reserved for worker-reported terminal or manual-intervention outcomes.
+- Idle `progress.md` and `status.json` notes should explain whether the loop is waiting on a local dependency, an external dependency, an unresolved dependency ID, or a retry window.
 
 ## Files
 
