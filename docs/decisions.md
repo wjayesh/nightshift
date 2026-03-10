@@ -95,3 +95,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: A live `ORCH-045` worker finished the code changes and validations, then stalled without emitting `TASK_DONE` after issuing multiple shell-tool calls in the same turn.
 - Decision: Add an explicit prompt rule for both task execution and review passes that requires developer tool calls to run serially, one at a time.
 - Impact: Future workers are less likely to deadlock on missing parallel tool responses, and operator intervention should become rarer during long autonomous runs.
+
+## 2026-03-10 - ORCH-044 - Preserve supervisor completion as a terminal state
+
+- Context: The Mahilo 2 supervisor recently fixed a bug where a clean worker completion could still be treated like a restart candidate or be overwritten back to `stopped` in the supervisor status artifact.
+- Decision: Port the same completion handling into the standalone extractor by treating a clean worker exit plus terminal completion runtime state as `completed`, then skipping restart/backoff and the final `stopped` overwrite.
+- Impact: `supervisor-status.json` now preserves terminal completion accurately, operators can distinguish a finished workflow from a manually stopped one, and the supervisor no longer restarts healthy workers that already finished all tracked tasks.

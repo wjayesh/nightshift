@@ -292,6 +292,9 @@ The supervisor polls the worker's `status.json` and falls back to
 is intentionally sleeping for the next poll or retry window does not look
 stalled just because its heartbeat is older.
 
+When the worker finishes all tracked tasks cleanly, the supervisor records a
+terminal `completed` state and exits without scheduling a restart.
+
 Set `--stall-seconds` higher than the longest expected uninterrupted task run.
 The worker refreshes runtime health at loop transitions, not continuously while
 the agent command is still running, so a very aggressive stall timeout will

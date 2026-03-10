@@ -245,6 +245,7 @@ export type OrchestratorSupervisorState =
   | "running"
   | "restarting"
   | "stopping"
+  | "completed"
   | "stopped"
   | "error";
 
@@ -3283,9 +3284,14 @@ function isWorkerRuntimeStalled(
 function didWorkerFinishAllTasks(
   worker: SupervisorWorkerProcess,
   snapshot: OrchestratorSupervisorWorkerSnapshot,
+  completionPhrase: string,
 ) {
   return (
-    worker.exited && worker.exitCode === 0 && snapshot.phase === "completed"
+    worker.exited &&
+    worker.exitCode === 0 &&
+    (snapshot.phase === "completed" ||
+      snapshot.lastNote === completionPhrase ||
+      snapshot.lastNote?.endsWith(` ${completionPhrase}`) === true)
   );
 }
 
@@ -4949,6 +4955,7 @@ async function runOrchestratorSupervisor(
   let worker: SupervisorWorkerProcess | null = null;
   let workerSnapshot = buildEmptySupervisorWorkerSnapshot("missing");
   let stopping = false;
+  let completed = false;
 
   const persistSupervisorStatus = () => {
     supervisorStatus.state = currentState;
@@ -5058,8 +5065,15 @@ async function runOrchestratorSupervisor(
           workerSnapshot = finalSnapshot;
         }
 
-        if (didWorkerFinishAllTasks(worker, workerSnapshot)) {
-          currentState = "stopped";
+        if (
+          didWorkerFinishAllTasks(
+            worker,
+            workerSnapshot,
+            workflow.completionPhrase,
+          )
+        ) {
+          completed = true;
+          currentState = "completed";
           persistSupervisorStatus();
           log(`Worker completed all tracked tasks for ${workflow.name}.`);
           return 0;
@@ -5113,9 +5127,11 @@ async function runOrchestratorSupervisor(
       await terminateProcessTree(worker.child.pid, runtime.sleep);
       cleanupWorkerLock(repoRoot, workflow);
     }
-    currentState = "stopped";
-    workerSnapshot = readSupervisorWorkerSnapshot(repoRoot, workflow);
-    persistSupervisorStatus();
+    if (!completed) {
+      currentState = "stopped";
+      workerSnapshot = readSupervisorWorkerSnapshot(repoRoot, workflow);
+      persistSupervisorStatus();
+    }
     releaseRuntimeLock(supervisorLockPath);
   }
 }

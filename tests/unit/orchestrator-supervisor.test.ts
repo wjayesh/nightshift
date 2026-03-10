@@ -20,12 +20,25 @@ const TEMP_REPOS: string[] = [];
 
 const NOOP_AGENT = `process.exit(0);\n`;
 const HANGING_AGENT = `setInterval(() => {}, 1000);\n`;
+const COMPLETE_AGENT = `const { writeFileSync } = require("node:fs");
+const outputIndex = process.argv.indexOf("-o");
+const outputPath = outputIndex >= 0 ? process.argv[outputIndex + 1] : null;
+if (!outputPath) {
+  process.exit(1);
+}
+writeFileSync(
+  outputPath,
+  \`TASK_DONE \${process.env.ORCHESTRATOR_TASK_ID ?? "TASK-001"}\\n\`,
+);
+process.exit(0);
+`;
 
 type SupervisorStatus = {
   pid: number;
   state: string;
   restartCount: number;
   lastRestartReason: string | null;
+  lastWorkerExitCode: number | null;
   worker: {
     pid: number | null;
     phase: string | null;
@@ -89,8 +102,26 @@ function createTempRepo(): string {
   mkdirSync(join(repoRoot, "docs"), { recursive: true });
   writeFileSync(join(repoRoot, "noop-agent.cjs"), NOOP_AGENT);
   writeFileSync(join(repoRoot, "hanging-agent.cjs"), HANGING_AGENT);
+  writeFileSync(join(repoRoot, "complete-agent.cjs"), COMPLETE_AGENT);
 
   return repoRoot;
+}
+
+function initializeGitRepo(repoRoot: string) {
+  spawnSync("git", ["init"], { cwd: repoRoot, encoding: "utf8" });
+  spawnSync("git", ["config", "user.name", "Supervisor Test"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  spawnSync("git", ["config", "user.email", "supervisor@test.invalid"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  spawnSync("git", ["add", "."], { cwd: repoRoot, encoding: "utf8" });
+  spawnSync("git", ["commit", "-m", "init"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
 }
 
 function runSupervisorCli(repoRoot: string, args: string[]) {
@@ -276,6 +307,54 @@ describe("standalone supervisor", () => {
       supervisor.kill("SIGTERM");
       await exitPromise;
     }
+  });
+
+  it("treats terminal completion as final without restart backoff", async () => {
+    const repoRoot = createTempRepo();
+    writeFileSync(
+      join(repoRoot, "docs/completing-task.md"),
+      createTaskDoc("TASK-DONE", "Completing Task"),
+    );
+    writeFileSync(
+      join(repoRoot, "WORKFLOW.completed.md"),
+      createWorkflow("docs/completing-task.md", "complete-agent.cjs", {
+        pollIntervalSeconds: 0,
+      }),
+    );
+    initializeGitRepo(repoRoot);
+
+    const supervisor = spawn(
+      RUNTIME_BINARY,
+      [
+        SUPERVISOR_SCRIPT_PATH,
+        "run",
+        "--workflow",
+        "WORKFLOW.completed.md",
+        "--stall-seconds",
+        "30",
+        "--check-interval-seconds",
+        "1",
+        "--restart-delay-seconds",
+        "0",
+      ],
+      {
+        cwd: repoRoot,
+        stdio: "pipe",
+      },
+    );
+
+    const exitResult = await waitForExit(supervisor);
+    expect(exitResult.code).toBe(0);
+
+    const status = await waitForCondition(
+      () => readSupervisorStatus(repoRoot),
+      (currentStatus) => !!currentStatus && currentStatus.state === "completed",
+    );
+
+    expect(status.restartCount).toBe(0);
+    expect(status.lastRestartReason).toBeNull();
+    expect(status.lastWorkerExitCode).toBe(0);
+    expect(status.worker.phase).toBe("completed");
   });
 
   it("supports background start, status, and stop commands", async () => {
