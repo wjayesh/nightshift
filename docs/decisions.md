@@ -107,3 +107,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The Mahilo 2 supervisor recently fixed a bug where a clean worker completion could still be treated like a restart candidate or be overwritten back to `stopped` in the supervisor status artifact.
 - Decision: Port the same completion handling into the standalone extractor by treating a clean worker exit plus terminal completion runtime state as `completed`, then skipping restart/backoff and the final `stopped` overwrite.
 - Impact: `supervisor-status.json` now preserves terminal completion accurately, operators can distinguish a finished workflow from a manually stopped one, and the supervisor no longer restarts healthy workers that already finished all tracked tasks.
+
+## 2026-03-10 - ORCH-032 - Keep crash hardening layered and repo-local
+
+- Context: The standalone repo now has the individual hardening pieces from ORCH-040 through ORCH-047, but the product docs still described crash hardening as deferred and did not spell out how the layers fit together.
+- Decision: Document crash hardening as one local recovery model: fail fast on duplicate workers, keep non-terminal failures `pending` with durable retry/backoff state, refresh stale task workspaces from the latest integration branch, keep terminal tracker status updates on the orchestrator, and use runtime health artifacts plus a separate supervisor for process restarts.
+- Impact: Operators can understand restart and failure behavior from the repo docs alone, copied repos inherit a concrete supervision model without adding external infrastructure, and future hardening work can extend the same runtime artifacts instead of introducing a parallel recovery system.

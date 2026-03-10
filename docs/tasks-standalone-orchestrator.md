@@ -259,12 +259,14 @@ Define how reviewer-created follow-up tasks are inserted and prioritized.
 ### 3.3 Add crash hardening
 
 - **ID**: `ORCH-032`
-- **Status**: `pending`
+- **Status**: `done`
 - **Priority**: P1
 - **Depends on**: ORCH-040, ORCH-041, ORCH-042, ORCH-043, ORCH-044, ORCH-045, ORCH-046, ORCH-047
 - **Notes**:
   - 2026-03-10: Expanded the broad crash-hardening goal into concrete runtime tasks `ORCH-040` through `ORCH-045` after reviewing the hardened Mahilo 2 orchestrator behavior.
   - 2026-03-10: Added `ORCH-046` and `ORCH-047` after reviewing the Mahilo 2 stale-branch fix; the standalone hardening umbrella now also includes tracker-owned status updates and stale workspace refresh recovery.
+  - 2026-03-10: Documented the standalone crash-hardening model across the PRD, README, and Mahilo orchestrator guide, covering fail-fast worker locks, non-terminal retries, stale-workspace refresh, tracker-owned terminal status updates, runtime health artifacts, repo-local supervision, and optional `launchd`.
+  - 2026-03-10: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-runtime-artifacts.test.ts tests/unit/orchestrator-review-loop.test.ts tests/unit/orchestrator-retries.test.ts tests/unit/orchestrator-cli.test.ts tests/unit/orchestrator-git-integration.test.ts tests/unit/orchestrator-supervisor.test.ts tests/unit/orchestrator-launchd.test.ts` and `node node_modules/prettier/bin/prettier.cjs --check README.md docs/standalone-orchestrator-prd.md docs/autonomous-orchestrator.md docs/decisions.md docs/tasks-standalone-orchestrator.md`.
 
 Add restart-friendly supervision for long-running loops.
 

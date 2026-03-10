@@ -90,7 +90,8 @@ The standalone repo should explicitly avoid:
 - requiring a server, dashboard, or database for normal operation
 - introducing heavy remote infrastructure or managed services
 - running multiple active implementation tasks within a single workflow by default
-- solving crash recovery, cross-project waiting semantics, or other advanced supervision concerns in v1
+- turning crash recovery or supervision into a hosted control plane
+- solving richer cross-project waiting semantics in v1
 
 These can be added later only if they materially improve the copy-into-repo product without turning it into a platform.
 
@@ -127,8 +128,10 @@ The standalone repo should preserve durable runtime artifacts as first-class beh
 
 - progress log
 - state file
+- runtime status and heartbeat files
 - per-task last-message capture
 - decision doc log
+- supervisor status file when supervised mode is enabled
 
 These files are part of the product, not debugging leftovers. They are how a repo keeps operational memory between runs.
 
@@ -184,12 +187,11 @@ The following are intentionally deferred to later tasks:
 
 - final repo and folder layout
 - exact CLI surface
-- crash-hardening strategy
 - richer waiting semantics for dependencies outside the current repo
 
-## Later Runtime Hardening
+## Crash Hardening Strategy
 
-After the review loop and baseline adoption flow are in place, the next hardening layer should stay lean and local-first:
+After the review loop and baseline adoption flow are in place, crash hardening should stay lean and local-first:
 
 - workflow-scoped worker locks so duplicate loops for the same workflow fail fast
 - dirty integration guards so cherry-picks do not run into a locally modified shared checkout
@@ -201,6 +203,8 @@ After the review loop and baseline adoption flow are in place, the next hardenin
 - optional macOS `launchd` support for long-running personal use
 
 These features are worth carrying into the standalone repo because they improve correctness and operability without turning the orchestrator into a remote control plane.
+
+Failure behavior should stay explicit: duplicate workers fail fast, agent/runtime/integration failures keep the task `pending` with durable retry state unless the worker explicitly reports `TASK_BLOCKED`, stale-workspace conflicts rebuild the task branch from the latest integration base before rerun, and the supervisor restarts only dead or stalled workers while exiting cleanly after terminal completion.
 
 ## Success Criteria
 

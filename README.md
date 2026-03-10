@@ -127,7 +127,8 @@ auto_push_every_commits: 3
 # Autonomous Development Workflow
 
 Read the instruction files first.
-Update the task doc status as work progresses.
+Do not edit task-tracker status metadata directly; report `TASK_DONE` or
+`TASK_BLOCKED` instead.
 Record consequential choices in the decision log.
 ```
 
@@ -141,7 +142,8 @@ existing workflows.
 Important front matter fields:
 
 - `task_sources`: task docs the orchestrator reads and expects the agent to
-  update.
+  update inside the assigned task section. The orchestrator, not the worker,
+  owns terminal `Status` line changes.
 - `dependency_sources`: optional docs used only to satisfy `Depends on`
   references across other files.
 - `instruction_files`: repo docs that must be read before the task section.
@@ -258,6 +260,31 @@ The most useful fields are:
   and the next scheduled retry time.
 - `waitingUntil`: when a sleeping worker expects to wake up for the next poll
   or retry window.
+
+## Crash Hardening And Recovery
+
+The standalone loop keeps crash recovery repo-local and file-backed instead of
+depending on a separate queue or service.
+
+- Duplicate same-workflow starts fail fast through `worker-<workflow>.lock`
+  and `supervisor-<workflow>.lock`.
+- Agent exits, runtime errors, dirty integration guards, and integration
+  failures keep the task `pending`, persist retry metadata in `state.json`,
+  and schedule exponential backoff from `task_failure_backoff_seconds` up to
+  `task_failure_retry_limit`.
+- Only a worker-emitted `TASK_BLOCKED <task-id>: <reason>` lets the
+  orchestrator record `blocked`; automatic retry exhaustion is still visible in
+  `progress.md`, `state.json`, and `status.json` while leaving the task
+  `pending` for operator review.
+- Cherry-pick content conflicts mark a task workspace stale and rebuild it from
+  the latest integration branch before rerun. Clean idle workspaces can also be
+  refreshed after integration moves forward.
+- Workers should not mutate task `Status` lines directly. After successful
+  terminal integration, the orchestrator records `done` or `blocked` on the
+  integration branch.
+- Long-running unattended operation goes through the supervisor, which watches
+  `status.json` with a `heartbeat.json` fallback, restarts dead or stalled
+  workers, and leaves `supervisor-status.json` behind for inspection.
 
 ## Supervisor
 
