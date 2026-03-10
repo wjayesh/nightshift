@@ -119,3 +119,9 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: The standalone docs still described `blocked` as generic waiting, but the runtime already kept retries `pending` and only used `TASK_BLOCKED` for terminal outcomes, which made dependency waits ambiguous.
 - Decision: Define dependency waits and retry waits as derived `pending` states surfaced through runtime notes and status artifacts, reserve `blocked` for terminal or manual-intervention outcomes, and treat `dependency_sources` as read-only upstream gates that never schedule work in the current workflow.
 - Impact: Operators can distinguish “not ready yet” from true blockage, cross-project dependencies stay one-way and repo-native, and idle runtime notes now explain when the loop is waiting on local, external, or unresolved dependencies.
+
+## 2026-03-10 - ORCH-048 - Dogfood through a replayable temp repo fixture
+
+- Context: Running ORCH-048 directly in the shared repo would mutate the live standalone task tracker and runtime artifacts, but the acceptance criteria needed repeatable review, retry, and stale-workspace scenarios with controlled failures.
+- Decision: Validate the task with an automated temp git repo fixture that calls the real standalone CLI, runs in `git_worktree` mode, and scripts deterministic task/review behavior for decision logging, retry backoff, and stale-workspace refresh.
+- Impact: The worker loop can now be replayed locally or in CI without polluting the main checkout, operator notes can point to one canonical dogfood command, and supervised restart coverage stays an explicit follow-up instead of being mixed into worker-loop validation.
