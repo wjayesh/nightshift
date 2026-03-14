@@ -12,6 +12,39 @@ already used by Mahilo's existing server workflow. In a copied standalone repo,
 the default shape is `WORKFLOW.md`, `docs/tasks.md`, `docs/decisions.md`, and
 `.orchestrator/`.
 
+## What This Variant Adds
+
+Symphony is a good base spec for autonomous orchestration. This repo is one
+repo-native adaptation of that idea, tuned for the way I code and meant to be
+cloned and adapted again by other people.
+
+The extra behavior bundled here is:
+
+- markdown task docs as the control plane, with `ID`, `Status`, `Priority`, and
+  `Depends on`, instead of assuming a hosted tracker
+- configurable file-backed runtime memory through `progress_file` and
+  `state_file`, plus sibling `status.json`, `heartbeat.json`,
+  `supervisor-status.json`, review logs, decision logs, and per-task
+  `*-last-message.txt`
+- dependency-aware scheduling across one or more task docs, plus read-only
+  `dependency_sources` for external prerequisites
+- explicit waiting semantics so unmet dependencies and retry windows stay
+  visible while tasks remain `pending`
+- a built-in review loop with `review_every_tasks`, review-created remediation
+  tasks, and durable review artifacts
+- explicit git policy through `required_branch`, `terminal_commit_behavior`, and
+  configurable `auto_push_every_commits`
+- isolated task execution with git worktrees as the default path and shared
+  workspace mode as the escape hatch
+- orchestrator-owned terminal status updates so workers do not create avoidable
+  task-doc conflicts
+- runtime hardening through workflow worker locks, dirty integration guards,
+  retry/backoff, stale-workspace refresh, a standalone supervisor, and optional
+  macOS `launchd`
+
+If that combination matches how you work, clone this repo, keep the pieces you
+want, and adapt the workflow and task docs to your own repo.
+
 ## Core Mental Model
 
 The repo is the control plane.
