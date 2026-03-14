@@ -1,18 +1,18 @@
-# Standalone Orchestrator
+# Nightshift
 
-A small, repo-native autonomous coding loop you can copy into another project.
-It keeps planning and execution in markdown, selects the next ready task from
-`Depends on`, runs one task at a time, and preserves operational memory in
-repo-owned files instead of a database or hosted tracker.
+A Symphony-inspired, repo-native autonomous coding loop you can clone and
+adapt to your own way of working.
 
-This repository is still the extraction workspace inside Mahilo. That means the
-standalone examples here use `WORKFLOW.orchestrator.md` and
-`docs/tasks-standalone-orchestrator.md`, because the root `WORKFLOW.md` is
-already used by Mahilo's existing server workflow. In a copied standalone repo,
-the default shape is `WORKFLOW.md`, `docs/tasks.md`, `docs/decisions.md`, and
-`.orchestrator/`.
+Nightshift keeps planning and execution in markdown, selects the next ready
+task from `Depends on`, runs one task at a time, and preserves operational
+memory in repo-owned files instead of a database or hosted tracker.
 
-## What This Variant Adds
+This repo self-hosts its standalone backlog with `WORKFLOW.orchestrator.md` and
+`docs/tasks-standalone-orchestrator.md`. A historical Mahilo usage example now
+lives under `examples/mahilo/`. In a copied standalone repo, the default shape
+is `WORKFLOW.md`, `docs/tasks.md`, `docs/decisions.md`, and `.orchestrator/`.
+
+## What Nightshift Adds
 
 Symphony is a good base spec for autonomous orchestration. This repo is one
 repo-native adaptation of that idea, tuned for the way I code and meant to be
@@ -165,12 +165,11 @@ Do not edit task-tracker status metadata directly; report `TASK_DONE` or
 Record consequential choices in the decision log.
 ```
 
-The current extraction repo uses the same shape but points at
+This repo uses the same shape but keeps its self-hosted queue in
 `WORKFLOW.orchestrator.md`, `docs/tasks-standalone-orchestrator.md`, and
 suffixed runtime artifact names such as `.orchestrator/orchestrator-progress.md`,
 `.orchestrator/orchestrator-status.json`, and
-`.orchestrator/orchestrator-heartbeat.json` to avoid colliding with Mahilo's
-existing workflows.
+`.orchestrator/orchestrator-heartbeat.json`.
 
 Important front matter fields:
 
