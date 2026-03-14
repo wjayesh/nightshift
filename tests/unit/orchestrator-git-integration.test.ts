@@ -73,12 +73,16 @@ function runGit(repoRoot: string, args: string[]) {
 function createRepo(
   workspaceMode: "shared" | "git_worktree",
   outcome: "done" | "blocked" = "done",
+  options: { ignoreRuntimeArtifacts?: boolean } = {},
 ): string {
   const repoRoot = mkdtempSync(join(tmpdir(), "orchestrator-git-"));
   TEMP_REPOS.push(repoRoot);
 
   mkdirSync(join(repoRoot, "docs"), { recursive: true });
-  writeFileSync(join(repoRoot, ".gitignore"), ".orchestrator/\n");
+  writeFileSync(
+    join(repoRoot, ".gitignore"),
+    options.ignoreRuntimeArtifacts === false ? "" : ".orchestrator/\n",
+  );
   writeFileSync(join(repoRoot, "fake-agent.cjs"), createTaskAgent(outcome));
   writeFileSync(
     join(repoRoot, "docs/tasks.md"),
@@ -164,7 +168,7 @@ describe("git integration dirty checkout guard", () => {
     ).toBe("1");
   });
 
-  it("does not block shared-workspace direct commits when the checkout is dirty", () => {
+  it("refuses to start a new shared-workspace task when the checkout is already dirty", () => {
     const repoRoot = createRepo("shared");
     const errors: string[] = [];
 
@@ -188,15 +192,20 @@ describe("git integration dirty checkout guard", () => {
     expect(exitCode).toBe(0);
     expect(errors).toEqual([]);
     expect(readFileSync(join(repoRoot, "docs/tasks.md"), "utf8")).toContain(
-      "- **Status**: `done`",
+      "- **Status**: `pending`",
     );
     expect(readFileSync(join(repoRoot, "scratch.txt"), "utf8")).toBe(
       "untracked change\n",
     );
-    expect(runGit(repoRoot, ["status", "--short"]).stdout.trim()).toBe("");
-    expect(runGit(repoRoot, ["log", "-1", "--pretty=%s"]).stdout.trim()).toBe(
-      "orchestrator: complete TASK-001 First Task",
+    expect(runGit(repoRoot, ["status", "--short"]).stdout).toContain(
+      "notes.txt",
     );
+    expect(runGit(repoRoot, ["status", "--short"]).stdout).toContain(
+      "scratch.txt",
+    );
+    expect(
+      runGit(repoRoot, ["rev-list", "--count", "HEAD"]).stdout.trim(),
+    ).toBe("1");
   });
 
   it("records blocked tracker status on the integration branch for git-worktree runs", () => {
@@ -228,6 +237,47 @@ describe("git integration dirty checkout guard", () => {
     ).toBe("2");
     expect(runGit(repoRoot, ["log", "-1", "--pretty=%s"]).stdout.trim()).toBe(
       "orchestrator: block TASK-001 First Task",
+    );
+  });
+
+  it("keeps shared-workspace runtime artifacts out of direct commits", () => {
+    const repoRoot = createRepo("shared", "done", {
+      ignoreRuntimeArtifacts: false,
+    });
+    const errors: string[] = [];
+
+    const exitCode = runOrchestratorLoop(
+      {
+        workflowFile: "WORKFLOW.md",
+        maxIterations: 1,
+        once: true,
+        dryRun: false,
+      },
+      {
+        repoRoot,
+        log: () => undefined,
+        error: (message) => errors.push(message),
+      },
+    );
+
+    const committedPaths = runGit(repoRoot, [
+      "show",
+      "--name-only",
+      "--pretty=format:",
+      "HEAD",
+    ])
+      .stdout.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    expect(exitCode).toBe(0);
+    expect(errors).toEqual([]);
+    expect(committedPaths).toContain("docs/tasks.md");
+    expect(
+      committedPaths.some((path) => path.startsWith(".orchestrator/")),
+    ).toBe(false);
+    expect(runGit(repoRoot, ["status", "--short"]).stdout).toContain(
+      ".orchestrator/",
     );
   });
 });

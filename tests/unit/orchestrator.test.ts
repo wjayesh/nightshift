@@ -27,7 +27,7 @@ auto_push_every_commits: 5
 review_every_tasks: 4
 task_failure_retry_limit: 2
 task_failure_backoff_seconds: 15
-required_branch: autonomous/server-integration
+required_branch: feature/integration
 ---
 # Workflow\nBody here.\n`);
 
@@ -43,7 +43,7 @@ required_branch: autonomous/server-integration
     expect(workflow.reviewEveryTasks).toBe(4);
     expect(workflow.taskFailureRetryLimit).toBe(2);
     expect(workflow.taskFailureBackoffSeconds).toBe(15);
-    expect(workflow.requiredBranch).toBe("autonomous/server-integration");
+    expect(workflow.requiredBranch).toBe("feature/integration");
     expect(workflow.workflowBody).toContain("Body here");
   });
 

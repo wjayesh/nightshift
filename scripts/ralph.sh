@@ -6,4 +6,13 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
-bun run scripts/orchestrator.ts "$@"
+ARGS=("$@")
+
+for ((index = 0; index < ${#ARGS[@]}; index += 1)); do
+  if [[ "${ARGS[$index]}" == "--workflow" ]]; then
+    bun run scripts/orchestrator.ts "${ARGS[@]}"
+    exit 0
+  fi
+done
+
+bun run scripts/orchestrator.ts --workflow WORKFLOW.orchestrator.md "${ARGS[@]}"

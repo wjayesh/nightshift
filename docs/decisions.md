@@ -131,3 +131,33 @@ Use this file to record consequential implementation decisions that should stay 
 - Context: ORCH-048 proved the standalone worker loop, but it never invoked the real supervisor or wrapper, and a true macOS `launchd` install/uninstall cycle is not portable enough for the default automated test path.
 - Decision: Add a second temp-repo integration fixture that runs the real supervisor, forces one external worker kill plus one hanging task so restart reasons come from live `status.json` polling, and keep the `launchd` surface cross-platform by validating plist generation while documenting install/uninstall as optional manual work.
 - Impact: Supervisor restart behavior is now replayable in CI and local drills without mutating the shared repo, operator notes point to a dedicated supervised dogfood command, and macOS service loading stays a documented follow-up instead of a required cross-platform test.
+
+## 2026-03-14 - ORCH-050 - Keep the standalone queue as the repo default
+
+- Context: This repo still contains copied Mahilo server and plugin workflows, and some helper scripts had drifted into treating those carryover workflows as the default orchestrator entrypoint even though the current project is only building the standalone orchestrator itself.
+- Decision: Make `WORKFLOW.orchestrator.md` plus `docs/tasks-standalone-orchestrator.md` the default queue for repo scripts and `scripts/ralph.sh`, and mark `WORKFLOW.md`, `WORKFLOW.plugin.md`, and `docs/autonomous-orchestrator.md` as legacy Mahilo carryover surfaces instead of standalone source of truth.
+- Impact: Running the repo defaults now targets only the standalone orchestrator backlog, while legacy Mahilo server or plugin loops remain available as explicit opt-in workflows for carryover maintenance.
+
+## 2026-03-14 - ORCH-051 - Guard the current checkout when `required_branch` is omitted
+
+- Context: A fixed integration-branch assumption makes copied repos fragile, and this extractor repo needs branch safety that follows whichever branch the code is actually checked out on.
+- Decision: When a workflow omits `required_branch`, capture the current `git branch --show-current` value at loop startup and use that as the workflow guard for the remainder of the run; keep explicit `required_branch` values as overrides.
+- Impact: Branch safety now follows the operator’s checkout by default, copied repos no longer need hard-coded branch names just to stay safe, and workflows can still pin integration to a named branch when that is intentional.
+
+## 2026-03-14 - ORCH-052 - Keep dry runs read-only and keep terminal status ownership on the orchestrator
+
+- Context: The standalone README described `--dry-run` as a safe preview, but the loop was still mutating iteration and progress state before returning, and some workflow docs still told workers to edit terminal task status directly even though the orchestrator had already taken ownership of that mutation.
+- Decision: Return from `--dry-run` before mutating state or progress, and align all workflow prose with the prompt contract so workers emit `TASK_DONE` or `TASK_BLOCKED` while the orchestrator records terminal `done` or `blocked` on the source task docs.
+- Impact: Preview runs stop leaving misleading runtime history behind, and worker instructions no longer contradict the orchestrator-owned task-status model introduced by ORCH-046.
+
+## 2026-03-14 - ORCH-053 - Treat runtime artifacts as internal bookkeeping in shared mode
+
+- Context: Shared-workspace mode was vulnerable in two ways: terminal outcome parsing accepted loose substrings and stale last-message files, and the direct-commit path used checkout-wide staging that could pick up orchestrator runtime artifacts or unrelated local dirt.
+- Decision: Require exact terminal marker lines, clear the saved last-message file before each run, ignore orchestrator-managed runtime paths when checking whether a shared checkout is already dirty, and exclude those same runtime paths from shared-workspace commit staging.
+- Impact: Retries no longer inherit stale terminal outcomes, shared mode still rejects unrelated checkout changes, and direct commits stop sweeping `.orchestrator` or `.mahilo-orchestrator` bookkeeping into task or review commits.
+
+## 2026-03-14 - ORCH-054 - Archive the Mahilo carryover under examples
+
+- Context: After the standalone workflow became the repo default, the remaining root-level Mahilo workflows, operator doc, and repo-local loop skill were still occupying the core surface even though they were only useful as historical context for how the orchestrator was used in one real repo.
+- Decision: Move those Mahilo-specific orchestrator files under `examples/mahilo/`, drop the legacy package scripts from the root package manifest, and keep README edits limited to the path/context corrections needed by that archive move.
+- Impact: The standalone repo now presents one clear core workflow surface, while the Mahilo-specific usage history remains available as an explicit example instead of a parallel root-level control path.

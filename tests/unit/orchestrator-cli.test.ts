@@ -60,6 +60,8 @@ function createWorkflowWithDependencies(
     workspaceRoot?: string;
     pollIntervalSeconds?: number;
     maxIterations?: number;
+    workspaceMode?: "shared" | "git_worktree";
+    requiredBranch?: string | null;
   } = {},
 ): string {
   const progressFile = options.progressFile ?? ".orchestrator/progress.md";
@@ -67,6 +69,7 @@ function createWorkflowWithDependencies(
   const workspaceRoot = options.workspaceRoot ?? ".orchestrator/workspaces";
   const pollIntervalSeconds = options.pollIntervalSeconds ?? 0;
   const maxIterations = options.maxIterations ?? 10;
+  const workspaceMode = options.workspaceMode ?? "shared";
 
   return [
     "---",
@@ -82,13 +85,16 @@ function createWorkflowWithDependencies(
     `progress_file: ${progressFile}`,
     `state_file: ${stateFile}`,
     `workspace_root: ${workspaceRoot}`,
-    "workspace_mode: shared",
+    `workspace_mode: ${workspaceMode}`,
     `agent_command: "${RUNTIME_BINARY}"`,
     "agent_args:",
     "  - fake-agent.cjs",
     `max_iterations: ${maxIterations}`,
     `poll_interval_seconds: ${pollIntervalSeconds}`,
     "completion_phrase: COMPLETE",
+    ...(options.requiredBranch
+      ? [`required_branch: ${options.requiredBranch}`]
+      : []),
     "terminal_commit_behavior: per_task",
     "auto_push_every_commits: 0",
     "---",
@@ -197,6 +203,41 @@ describe("standalone orchestrator CLI", () => {
     expect(existsSync(join(repoRoot, ".agent-runs"))).toBe(false);
     expect(result.stdout).toContain("Dry run selected task summary:");
     expect(result.stdout).toContain("- Task: TASK-001");
+  });
+
+  it("leaves state and progress artifacts unchanged during --dry-run", () => {
+    const repoRoot = createTempRepo();
+    mkdirSync(join(repoRoot, ".orchestrator"), { recursive: true });
+
+    const statePath = join(repoRoot, ".orchestrator/state.json");
+    const progressPath = join(repoRoot, ".orchestrator/progress.md");
+    const originalState =
+      JSON.stringify(
+        {
+          workflowPath: "WORKFLOW.md",
+          iteration: 7,
+          activeTaskId: null,
+          commitsSincePush: 0,
+          lastCommittedTaskId: null,
+          lastCommitSha: null,
+          reviews: [],
+          lastReviewedCompletionCount: 0,
+          taskFailures: {},
+          history: [],
+        },
+        null,
+        2,
+      ) + "\n";
+    const originalProgress = "# cli-test Progress\n\n- preserved entry\n";
+
+    writeFileSync(statePath, originalState);
+    writeFileSync(progressPath, originalProgress);
+
+    const result = runCli(repoRoot, ["--once", "--dry-run"]);
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(statePath, "utf8")).toBe(originalState);
+    expect(readFileSync(progressPath, "utf8")).toBe(originalProgress);
   });
 
   it("supports workflow file selection", () => {
@@ -399,5 +440,56 @@ describe("standalone orchestrator CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("COMPLETE");
     expect(result.stderr).toBe("");
+  });
+
+  it("uses the current checkout branch when required_branch is omitted", () => {
+    const repoRoot = createTempRepo();
+
+    writeFileSync(
+      join(repoRoot, "fake-agent.cjs"),
+      `const fs = require("node:fs");
+const path = require("node:path");
+let outputPath = null;
+for (let index = 2; index < process.argv.length; index += 1) {
+  if (process.argv[index] === "-o" && process.argv[index + 1]) {
+    outputPath = process.argv[index + 1];
+    index += 1;
+  }
+}
+if (!outputPath) process.exit(2);
+fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+fs.writeFileSync(outputPath, "TASK_DONE TASK-001\\n");
+`,
+    );
+    writeFileSync(
+      join(repoRoot, "WORKFLOW.branchless.md"),
+      createWorkflowWithDependencies("docs/tasks.md", [], {
+        workspaceMode: "git_worktree",
+      }),
+    );
+
+    expect(runGit(repoRoot, ["init", "-b", "feature/self-fix"]).status).toBe(0);
+    expect(
+      runGit(repoRoot, ["config", "user.email", "cli-test@example.com"]).status,
+    ).toBe(0);
+    expect(runGit(repoRoot, ["config", "user.name", "CLI Test"]).status).toBe(
+      0,
+    );
+    expect(runGit(repoRoot, ["add", "-A"]).status).toBe(0);
+    expect(runGit(repoRoot, ["commit", "-m", "initial"]).status).toBe(0);
+
+    const result = runCli(repoRoot, [
+      "--once",
+      "--workflow",
+      "WORKFLOW.branchless.md",
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(runGit(repoRoot, ["branch", "--show-current"]).stdout.trim()).toBe(
+      "feature/self-fix",
+    );
+    expect(readFileSync(join(repoRoot, "docs/tasks.md"), "utf8")).toContain(
+      "- **Status**: `done`",
+    );
   });
 });

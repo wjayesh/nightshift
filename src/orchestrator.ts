@@ -113,6 +113,8 @@ export type OrchestratorState = {
   workflowPath: string;
   iteration: number;
   activeTaskId: string | null;
+  sharedWorkspaceOwnerId: string | null;
+  sharedWorkspaceOwnerKind: "task" | "review" | null;
   commitsSincePush: number;
   lastCommittedTaskId: string | null;
   lastCommitSha: string | null;
@@ -987,6 +989,8 @@ export function loadState(
       workflowPath: config.workflowPath,
       iteration: 0,
       activeTaskId: null,
+      sharedWorkspaceOwnerId: null,
+      sharedWorkspaceOwnerKind: null,
       commitsSincePush: 0,
       lastCommittedTaskId: null,
       lastCommitSha: null,
@@ -1015,6 +1019,12 @@ export function loadState(
     workflowPath: state.workflowPath ?? config.workflowPath,
     iteration: state.iteration ?? 0,
     activeTaskId: state.activeTaskId ?? null,
+    sharedWorkspaceOwnerId: state.sharedWorkspaceOwnerId ?? null,
+    sharedWorkspaceOwnerKind:
+      state.sharedWorkspaceOwnerKind === "task" ||
+      state.sharedWorkspaceOwnerKind === "review"
+        ? state.sharedWorkspaceOwnerKind
+        : null,
     commitsSincePush: state.commitsSincePush ?? 0,
     lastCommittedTaskId: state.lastCommittedTaskId ?? null,
     lastCommitSha: state.lastCommitSha ?? null,
@@ -1130,6 +1140,126 @@ function resolveIntegrationBranch(
   config: Pick<WorkflowConfig, "requiredBranch">,
 ) {
   return config.requiredBranch ?? getCurrentBranch(repoRoot);
+}
+
+function isGitRepository(repoPath: string): boolean {
+  const result = runGit(["rev-parse", "--is-inside-work-tree"], repoPath);
+  return result.status === 0 && result.stdout.trim() === "true";
+}
+
+function isPathInside(parentPath: string, candidatePath: string): boolean {
+  const candidateRelative = relative(parentPath, candidatePath);
+  return (
+    candidateRelative === "" ||
+    (!candidateRelative.startsWith("..") && !isAbsolute(candidateRelative))
+  );
+}
+
+function normalizeGitPathspecPath(
+  repoPath: string,
+  maybeRelativePath: string,
+): string | null {
+  const absolutePath = resolvePath(repoPath, maybeRelativePath);
+  const repoRelativePath = relative(repoPath, absolutePath).replace(/\\/g, "/");
+  if (!repoRelativePath) {
+    return ".";
+  }
+  if (repoRelativePath.startsWith("..")) {
+    return null;
+  }
+  return repoRelativePath;
+}
+
+function buildScopedGitPathspecArgs(
+  repoPath: string,
+  excludedPaths: string[] = [],
+): string[] {
+  const exclusions = dedupeStrings(
+    excludedPaths
+      .map((path) => normalizeGitPathspecPath(repoPath, path))
+      .filter((path): path is string => !!path && path !== "."),
+  ).map((path) => `:(exclude)${path}`);
+
+  return exclusions.length > 0 ? ["--", ".", ...exclusions] : ["--", "."];
+}
+
+function getManagedRuntimePaths(
+  repoRoot: string,
+  workflow: Pick<WorkflowConfig, "progressFile" | "stateFile" | "workflowPath">,
+): string[] {
+  const runtimeRoot = getRuntimeRoot(repoRoot, workflow);
+  const progressPath = resolvePath(repoRoot, workflow.progressFile);
+
+  if (resolve(repoRoot) !== runtimeRoot) {
+    return isPathInside(runtimeRoot, progressPath)
+      ? [runtimeRoot]
+      : [runtimeRoot, progressPath];
+  }
+
+  return dedupeStrings([
+    resolvePath(repoRoot, workflow.progressFile),
+    resolvePath(repoRoot, workflow.stateFile),
+    getRuntimeStatusPath(repoRoot, workflow),
+    getRuntimeHeartbeatPath(repoRoot, workflow),
+    getSupervisorStatusPath(repoRoot, workflow),
+    getRepoLockPath(repoRoot, workflow as WorkflowConfig),
+    getWorkerLockPath(repoRoot, workflow as WorkflowConfig),
+    getSupervisorLockPath(repoRoot, workflow as WorkflowConfig),
+  ]);
+}
+
+function claimSharedWorkspace(
+  repoRoot: string,
+  workflow: Pick<
+    WorkflowConfig,
+    "progressFile" | "requiredBranch" | "stateFile" | "workflowPath"
+  >,
+  state: Pick<
+    OrchestratorState,
+    "sharedWorkspaceOwnerId" | "sharedWorkspaceOwnerKind"
+  >,
+  owner: { id: string; kind: "task" | "review" },
+) {
+  const dirtyEntries = listDirtyCheckoutEntries(
+    repoRoot,
+    getManagedRuntimePaths(repoRoot, workflow),
+  );
+  const sameOwner =
+    state.sharedWorkspaceOwnerId === owner.id &&
+    state.sharedWorkspaceOwnerKind === owner.kind;
+
+  if (dirtyEntries.length > 0 && !sameOwner) {
+    const integrationBranch = resolveIntegrationBranch(repoRoot, workflow);
+    const existingOwner = state.sharedWorkspaceOwnerId
+      ? `${state.sharedWorkspaceOwnerKind ?? "task"} ${state.sharedWorkspaceOwnerId}`
+      : "an unrelated change set";
+    const branchLabel = integrationBranch ?? "the current checkout";
+    throw new Error(
+      `Shared workspace cannot start ${owner.kind} ${owner.id} because ${branchLabel} has uncommitted changes owned by ${existingOwner}: ${summarizeDirtyCheckout(dirtyEntries)}. Clean or commit those paths, or switch this workflow to git_worktree mode.`,
+    );
+  }
+
+  state.sharedWorkspaceOwnerId = owner.id;
+  state.sharedWorkspaceOwnerKind = owner.kind;
+}
+
+function releaseSharedWorkspace(
+  state: Pick<
+    OrchestratorState,
+    "sharedWorkspaceOwnerId" | "sharedWorkspaceOwnerKind"
+  >,
+  owner?: { id: string; kind: "task" | "review" },
+) {
+  if (
+    owner &&
+    (state.sharedWorkspaceOwnerId !== owner.id ||
+      state.sharedWorkspaceOwnerKind !== owner.kind)
+  ) {
+    return;
+  }
+
+  state.sharedWorkspaceOwnerId = null;
+  state.sharedWorkspaceOwnerKind = null;
 }
 
 function shouldRefreshIdleTaskWorkspace(
@@ -1668,8 +1798,23 @@ export function listUniqueCommits(repoPath: string, baseRef: string): string[] {
     .filter((commit) => unapplied.has(commit));
 }
 
-function listDirtyCheckoutEntries(repoPath: string): string[] {
-  const statusResult = runGit(["status", "--porcelain"], repoPath);
+function getDirtyCheckoutStatusLines(
+  repoPath: string,
+  excludedPaths: string[] = [],
+): string[] {
+  if (!isGitRepository(repoPath)) {
+    return [];
+  }
+
+  const statusResult = runGit(
+    [
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      ...buildScopedGitPathspecArgs(repoPath, excludedPaths),
+    ],
+    repoPath,
+  );
   if (statusResult.status !== 0) {
     throw new Error(
       `Failed to inspect integration checkout status: ${gitError(statusResult, "git status failed")}`,
@@ -1679,12 +1824,36 @@ function listDirtyCheckoutEntries(repoPath: string): string[] {
   return statusResult.stdout
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
-    .filter((line) => line.trim().length > 0)
-    .map((line) => {
-      const status = line.slice(0, 2).trim() || line.slice(0, 2);
+    .filter((line) => line.trim().length > 0);
+}
+
+function listDirtyCheckoutEntries(
+  repoPath: string,
+  excludedPaths: string[] = [],
+): string[] {
+  return getDirtyCheckoutStatusLines(repoPath, excludedPaths).map((line) => {
+    const status = line.slice(0, 2).trim() || line.slice(0, 2);
+    const path = line.slice(3).trim();
+    return `${status} ${path}`.trim();
+  });
+}
+
+function listDirtyCheckoutPaths(
+  repoPath: string,
+  excludedPaths: string[] = [],
+): string[] {
+  return dedupeStrings(
+    getDirtyCheckoutStatusLines(repoPath, excludedPaths).flatMap((line) => {
       const path = line.slice(3).trim();
-      return `${status} ${path}`.trim();
-    });
+      if (!path) {
+        return [];
+      }
+      return path
+        .split(" -> ")
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+    }),
+  );
 }
 
 function summarizeDirtyCheckout(entries: string[], maxEntries = 5): string {
@@ -1699,10 +1868,14 @@ function summarizeDirtyCheckout(entries: string[], maxEntries = 5): string {
 
 function assertCleanIntegrationCheckout(
   repoRoot: string,
+  workflow: Pick<WorkflowConfig, "progressFile" | "stateFile" | "workflowPath">,
   integrationBranch: string,
   subject: string,
 ) {
-  const dirtyEntries = listDirtyCheckoutEntries(repoRoot);
+  const dirtyEntries = listDirtyCheckoutEntries(
+    repoRoot,
+    getManagedRuntimePaths(repoRoot, workflow),
+  );
   if (dirtyEntries.length === 0) {
     return;
   }
@@ -1715,8 +1888,14 @@ function assertCleanIntegrationCheckout(
 export function commitPendingChanges(
   repoPath: string,
   message: string,
+  options: { excludedPaths?: string[] } = {},
 ): RepoCommitResult {
-  const addResult = runGit(["add", "-A"], repoPath);
+  const dirtyPaths = listDirtyCheckoutPaths(repoPath, options.excludedPaths);
+  if (dirtyPaths.length === 0) {
+    return { committed: false, commitSha: null, error: null };
+  }
+
+  const addResult = runGit(["add", "-A", "--", ...dirtyPaths], repoPath);
   if (addResult.status !== 0) {
     return {
       committed: false,
@@ -1725,17 +1904,16 @@ export function commitPendingChanges(
     };
   }
 
-  const statusResult = runGit(["status", "--porcelain"], repoPath);
-  if (statusResult.status !== 0) {
+  const diffResult = runGit(["diff", "--cached", "--quiet"], repoPath);
+  if (diffResult.status === 0) {
+    return { committed: false, commitSha: null, error: null };
+  }
+  if (diffResult.status !== 1) {
     return {
       committed: false,
       commitSha: null,
-      error: gitError(statusResult, "git status failed"),
+      error: gitError(diffResult, "git diff --cached failed"),
     };
-  }
-
-  if (!statusResult.stdout.trim()) {
-    return { committed: false, commitSha: null, error: null };
   }
 
   const commitResult = runGit(["commit", "-m", message], repoPath);
@@ -1903,6 +2081,7 @@ function runAgentCommand(
 ): AgentRunResult {
   const lastMessagePath = getLastMessagePath(repoRoot, config, identifier);
   ensureDirectory(dirname(lastMessagePath));
+  rmSync(lastMessagePath, { force: true });
   const args = [
     ...config.agentArgs,
     "-C",
@@ -3351,20 +3530,39 @@ function findTaskById(tasks: Task[], taskId: string): Task | null {
   return tasks.find((task) => task.id === taskId) ?? null;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function findTaskTerminalLine(
+  taskId: string,
+  lastMessage: string,
+  kind: "done" | "blocked",
+): string | null {
+  const trimmedLines = lastMessage
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const escapedTaskId = escapeRegExp(taskId);
+  const pattern =
+    kind === "done"
+      ? new RegExp(`^TASK_DONE ${escapedTaskId}$`)
+      : new RegExp(`^TASK_BLOCKED ${escapedTaskId}(?::\\s*.*)?$`);
+
+  return trimmedLines.find((line) => pattern.test(line)) ?? null;
+}
+
 function didTaskComplete(taskId: string, lastMessage: string): boolean {
-  return lastMessage.includes(`TASK_DONE ${taskId}`);
+  return findTaskTerminalLine(taskId, lastMessage, "done") !== null;
 }
 
 function didTaskBlock(taskId: string, lastMessage: string): boolean {
-  return lastMessage.includes(`TASK_BLOCKED ${taskId}`);
+  return findTaskTerminalLine(taskId, lastMessage, "blocked") !== null;
 }
 
 function extractBlockedReason(taskId: string, lastMessage: string): string {
   return (
-    lastMessage
-      .split("\n")
-      .find((line) => line.includes(`TASK_BLOCKED ${taskId}`)) ??
-    `${taskId} blocked.`
+    findTaskTerminalLine(taskId, lastMessage, "blocked") ?? `${taskId} blocked.`
   );
 }
 
@@ -3943,6 +4141,12 @@ function integrateReviewPass(params: {
   const commitResult = commitPendingChanges(
     workspace.path,
     `orchestrator: review ${reviewId} ${reviewSummary}`,
+    {
+      excludedPaths:
+        workspace.kind === "shared"
+          ? getManagedRuntimePaths(repoRoot, workflow)
+          : [],
+    },
   );
   if (commitResult.error) {
     throw new Error(
@@ -3991,6 +4195,7 @@ function integrateReviewPass(params: {
       historyNote = `${historyNote} Pushed ${integrationBranch}.`;
     }
 
+    releaseSharedWorkspace(state, { id: reviewId, kind: "review" });
     return {
       historyNote,
       refreshedActionableTasks,
@@ -4012,7 +4217,12 @@ function integrateReviewPass(params: {
     }
 
     if (workspace.kind === "git_worktree") {
-      assertCleanIntegrationCheckout(repoRoot, integrationBranch, reviewId);
+      assertCleanIntegrationCheckout(
+        repoRoot,
+        workflow,
+        integrationBranch,
+        reviewId,
+      );
     }
 
     const cherryPickResult = cherryPickCommits(repoRoot, uniqueCommits);
@@ -4156,6 +4366,14 @@ function executeReviewPass(params: {
   });
 
   try {
+    if (workflow.workspaceMode === "shared") {
+      claimSharedWorkspace(repoRoot, workflow, state, {
+        id: reviewId,
+        kind: "review",
+      });
+      saveState(repoRoot, workflow, state);
+    }
+
     const workspace = ensureWorkspace(repoRoot, workflow, reviewTask);
     const runResult = runAgentForReview(
       repoRoot,
@@ -4340,7 +4558,12 @@ function integrateTerminalTask(params: {
   restoreTaskStatusMetadata(workspace.path, rootTask, task.status);
   const commitVerb = terminalStatus === "completed" ? "complete" : "block";
   const commitMessage = `orchestrator: ${commitVerb} ${task.id} ${task.title}`;
-  const commitResult = commitPendingChanges(workspace.path, commitMessage);
+  const commitResult = commitPendingChanges(workspace.path, commitMessage, {
+    excludedPaths:
+      workspace.kind === "shared"
+        ? getManagedRuntimePaths(repoRoot, workflow)
+        : [],
+  });
   if (commitResult.error) {
     throw new Error(
       `${task.id} ${commitVerb} auto-commit failed in task branch: ${commitResult.error}`,
@@ -4412,6 +4635,7 @@ function integrateTerminalTask(params: {
       historyNote = `${historyNote} Pushed ${integrationBranch}.`;
     }
 
+    releaseSharedWorkspace(state, { id: task.id, kind: "task" });
     return { historyNote, refreshedActionableTasks };
   }
 
@@ -4427,7 +4651,12 @@ function integrateTerminalTask(params: {
       }
 
       if (workspace.kind === "git_worktree") {
-        assertCleanIntegrationCheckout(repoRoot, integrationBranch, task.id);
+        assertCleanIntegrationCheckout(
+          repoRoot,
+          workflow,
+          integrationBranch,
+          task.id,
+        );
       }
 
       const trackerCommitResult = recordTerminalTaskStatusOnIntegrationBranch({
@@ -4499,7 +4728,12 @@ function integrateTerminalTask(params: {
     }
 
     if (workspace.kind === "git_worktree") {
-      assertCleanIntegrationCheckout(repoRoot, integrationBranch, task.id);
+      assertCleanIntegrationCheckout(
+        repoRoot,
+        workflow,
+        integrationBranch,
+        task.id,
+      );
     }
 
     const cherryPickResult = cherryPickCommits(repoRoot, uniqueCommits);
@@ -4585,8 +4819,11 @@ export function runOrchestratorLoop(
     runtime.sleep ?? ((milliseconds: number) => Bun.sleepSync(milliseconds));
 
   const workflow = loadWorkflow(repoRoot, options.workflowFile);
-  const requiredBranch = workflow.requiredBranch;
   const currentBranch = getCurrentBranch(repoRoot);
+  if (!workflow.requiredBranch && currentBranch) {
+    workflow.requiredBranch = currentBranch;
+  }
+  const requiredBranch = workflow.requiredBranch;
 
   if (requiredBranch && currentBranch !== requiredBranch) {
     error(
@@ -4754,22 +4991,11 @@ export function runOrchestratorLoop(
           task,
           state,
         );
-
-        state.iteration += 1;
-        state.activeTaskId = task.id;
-        appendProgress(repoRoot, workflow, [
-          formatHistoryNote(
-            task.id,
-            task.id === state.lastCommittedTaskId ? "continued" : "started",
-            taskSelectionNote,
-          ),
-        ]);
-        saveState(repoRoot, workflow, state);
-
-        log(`\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`);
-        log(`Workspace: ${workspacePreview}`);
+        const nextIteration = state.iteration + 1;
 
         if (options.dryRun) {
+          log(`\n=== Iteration ${nextIteration}: ${task.id} ${task.title} ===`);
+          log(`Workspace: ${workspacePreview}`);
           log("Dry run selected task summary:");
           log(`- Task: ${task.id}`);
           log(`- Status: ${task.status}`);
@@ -4785,6 +5011,20 @@ export function runOrchestratorLoop(
           });
           return 0;
         }
+
+        state.iteration += 1;
+        state.activeTaskId = task.id;
+        appendProgress(repoRoot, workflow, [
+          formatHistoryNote(
+            task.id,
+            task.id === state.lastCommittedTaskId ? "continued" : "started",
+            taskSelectionNote,
+          ),
+        ]);
+        saveState(repoRoot, workflow, state);
+
+        log(`\n=== Iteration ${state.iteration}: ${task.id} ${task.title} ===`);
+        log(`Workspace: ${workspacePreview}`);
 
         reportRuntimeHealth({
           phase: "running_task",
@@ -4803,6 +5043,14 @@ export function runOrchestratorLoop(
         let taskFailureKind: TaskFailureKind = "runtime";
 
         try {
+          if (workflow.workspaceMode === "shared") {
+            claimSharedWorkspace(repoRoot, workflow, state, {
+              id: task.id,
+              kind: "task",
+            });
+            saveState(repoRoot, workflow, state);
+          }
+
           const workspace = ensureTaskWorkspace(
             repoRoot,
             workflow,

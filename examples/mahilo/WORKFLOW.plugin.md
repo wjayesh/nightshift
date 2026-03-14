@@ -18,7 +18,6 @@ agent_args:
 max_iterations: 50
 poll_interval_seconds: 3
 completion_phrase: COMPLETE
-required_branch: autonomous/server-integration
 terminal_commit_behavior: per_task
 review_every_tasks: 0
 auto_push_every_commits: 3
@@ -26,34 +25,44 @@ auto_push_every_commits: 3
 
 # Mahilo Plugin Autonomous Workflow
 
+Historical Mahilo example note: this workflow was moved under
+`examples/mahilo/` to show how the orchestrator was used on a real repo. The
+standalone source of truth in this repo is `WORKFLOW.orchestrator.md`.
+
 You are the implementation agent for the Mahilo OpenClaw plugin.
 
-Your job is to autonomously move the plugin task list forward using the task documents as the source of truth.
+Your job is to autonomously move the plugin task list forward using the task
+documents as the source of truth.
 
 ## How to Work
 
 - Read the instruction files first.
-- Read the assigned task section carefully, including dependencies and acceptance criteria.
+- Read the assigned task section carefully, including dependencies and
+  acceptance criteria.
 - Implement the task fully before moving on.
 - Prefer focused, incremental changes that keep the repo working.
-- Update the task status in the source task file as soon as the state changes.
 - Add a short progress note after each iteration.
 - Run the most relevant tests or validation commands for the code you changed.
 - Do not start unrelated tasks just because they are nearby.
+- Do not edit the task status metadata directly; let the orchestrator record
+  terminal `done` or `blocked` after successful integration.
 
 ## Task Completion Rules
 
-- Mark tasks `in-progress` when work begins.
-- Mark tasks `done` only when the implementation and the relevant validation are complete.
-- Mark tasks `blocked` only when there is a real dependency or external blocker.
+- Report terminal completion with `TASK_DONE <task-id>`.
+- Report terminal blockers with `TASK_BLOCKED <task-id>: <reason>`.
 - If all tracked tasks are done, say `COMPLETE`.
 
 ## Coordination Rules
 
 - Treat the tracked markdown docs as the issue tracker.
-- Respect dependency ordering, including server-side `SRV-*` dependencies from the shared contract.
+- Respect dependency ordering, including server-side `SRV-*` dependencies from
+  the shared contract.
 - Prefer P0 work before lower priorities.
 - Use the assigned workspace only.
-- Prefer editing only `plugins/openclaw-mahilo/`, plugin-local tests/config, and `docs/prd-openclaw-plugin-migration.md`.
-- Do not edit server implementation files, `docs/prd-server-policy-platform.md`, or `docs/openclaw-plugin-server-contract.md` from the plugin workflow.
-- If plugin work requires a server or contract change, mark the task blocked and explain the dependency instead of editing shared files directly.
+- Prefer editing only `plugins/openclaw-mahilo/`, plugin-local tests/config,
+  and `docs/prd-openclaw-plugin-migration.md`.
+- Do not edit server implementation files, `docs/prd-server-policy-platform.md`,
+  or `docs/openclaw-plugin-server-contract.md` from the plugin workflow.
+- If plugin work requires a server or contract change, mark the task blocked
+  and explain the dependency instead of editing shared files directly.

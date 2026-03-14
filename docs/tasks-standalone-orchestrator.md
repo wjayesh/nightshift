@@ -492,3 +492,102 @@ Run the dogfood fixture under the standalone supervisor and optional macOS wrapp
 - [ ] The supervisor observes a stalled worker via `status.json` or `heartbeat.json`
 - [ ] Operator-facing notes capture any supervisor- or `launchd`-specific gaps
 - [ ] macOS `launchd` validation remains optional but is documented when skipped
+
+### 5.3 Make the standalone queue the repo default
+
+- **ID**: `ORCH-050`
+- **Status**: `done`
+- **Priority**: P0
+- **Depends on**: ORCH-020
+- **Notes**:
+  - 2026-03-14: Switched the repo-default orchestrator scripts and `scripts/ralph.sh` to `WORKFLOW.orchestrator.md`, which keeps the standalone queue as the default entrypoint instead of the copied Mahilo server or plugin workflows.
+  - 2026-03-14: Marked `WORKFLOW.md`, `WORKFLOW.plugin.md`, and `docs/autonomous-orchestrator.md` as legacy Mahilo carryover surfaces, removed legacy Mahilo instruction files from the standalone workflow, and updated `.codex/skills/mahilo-loop-ops/SKILL.md` so legacy loops remain explicit opt-in behavior.
+  - 2026-03-14: Set `WORKFLOW.orchestrator.md` to `git_worktree` mode so the standalone default no longer depends on shared-checkout commits.
+
+Keep this repo focused on building the standalone orchestrator, with copied Mahilo workflows treated as legacy carryover rather than the default queue.
+
+**Acceptance Criteria**
+
+- [x] The default repo scripts target `WORKFLOW.orchestrator.md`
+- [x] Legacy Mahilo workflows are clearly marked as carryover, not standalone source of truth
+- [x] The standalone default workflow uses the safer `git_worktree` mode
+- [x] Operator-facing repo instructions no longer imply the plugin queue is part of the standalone backlog
+
+### 5.4 Guard the current checkout branch by default
+
+- **ID**: `ORCH-051`
+- **Status**: `done`
+- **Priority**: P0
+- **Depends on**: ORCH-010
+- **Notes**:
+  - 2026-03-14: Changed the loop startup path so workflows without `required_branch` now snapshot the current checked-out branch and guard integration against that branch for the rest of the run.
+  - 2026-03-14: Left `required_branch` intact as an explicit override for repos that want a pinned integration branch instead of the current checkout.
+
+Make branch safety follow the repo checkout by default instead of relying on a hard-coded branch name.
+
+**Acceptance Criteria**
+
+- [x] Workflows without `required_branch` use the current checked-out branch as the guard target
+- [x] Explicit `required_branch` values still override the default
+- [x] The branch-guard behavior is documented as current-checkout-by-default
+- [x] Focused tests cover the branchless workflow path
+
+### 5.5 Keep dry runs side-effect free and keep terminal status ownership aligned
+
+- **ID**: `ORCH-052`
+- **Status**: `done`
+- **Priority**: P0
+- **Depends on**: ORCH-011, ORCH-046
+- **Notes**:
+  - 2026-03-14: Moved the `--dry-run` return path ahead of iteration, active-task, progress, and state mutations so dry runs remain a safe preview instead of altering runtime artifacts.
+  - 2026-03-14: Aligned `WORKFLOW.md`, `WORKFLOW.plugin.md`, and `WORKFLOW.orchestrator.md` with the prompt contract so workers report `TASK_DONE` or `TASK_BLOCKED`, while the orchestrator remains responsible for terminal status updates in task docs.
+
+Keep preview mode read-only and remove contradictory status-update instructions from workflow docs.
+
+**Acceptance Criteria**
+
+- [x] `--dry-run` leaves progress and state artifacts unchanged
+- [x] Workflow docs tell workers to emit terminal markers instead of editing terminal status directly
+- [x] Prompt contract and workflow prose agree on task-status ownership
+- [x] Focused tests cover the dry-run artifact behavior
+
+### 5.6 Harden shared-workspace and terminal-message safety
+
+- **ID**: `ORCH-053`
+- **Status**: `done`
+- **Priority**: P0
+- **Depends on**: ORCH-012, ORCH-041, ORCH-046
+- **Notes**:
+  - 2026-03-14: Tightened terminal detection to exact `TASK_DONE <id>` and `TASK_BLOCKED <id>` lines, and clear the per-task `*-last-message.txt` artifact before each run so stale terminal output cannot be reused on retries.
+  - 2026-03-14: Added shared-workspace ownership tracking plus dirty-check filtering so orchestrator-managed runtime files do not block the next task or review, while unrelated pre-existing checkout changes still do.
+  - 2026-03-14: Changed shared-workspace commit staging to exclude orchestrator-managed runtime paths, so task or review commits stop sweeping `.orchestrator` or `.mahilo-orchestrator` bookkeeping into the integration history.
+
+Harden the terminal parsing and shared-workspace safety model so direct-commit mode behaves predictably without committing internal runtime artifacts.
+
+**Acceptance Criteria**
+
+- [x] Terminal completion and block detection require exact standalone marker lines
+- [x] Stale last-message artifacts are cleared before each task or review run
+- [x] Shared-workspace dirty checks ignore orchestrator-owned runtime bookkeeping but still reject unrelated checkout changes
+- [x] Shared-workspace commits exclude runtime artifacts instead of staging everything with `git add -A`
+- [x] Focused tests cover terminal parsing, dry shared-mode fixtures, review passes, and shared-commit exclusions
+
+### 5.7 Archive the Mahilo carryover under examples
+
+- **ID**: `ORCH-054`
+- **Status**: `done`
+- **Priority**: P1
+- **Depends on**: ORCH-050
+- **Notes**:
+  - 2026-03-14: Moved the legacy Mahilo server workflow, plugin workflow, operator doc, and repo-local loop skill under `examples/mahilo/` so they remain available as a historical example without occupying the standalone core surface.
+  - 2026-03-14: Removed the legacy Mahilo package scripts, updated the standalone workflow note to point at `examples/mahilo/`, and made only the minimal README path edits needed now that the root no longer carries those archived workflows.
+  - 2026-03-14: Validation passed with `bun test tests/unit/orchestrator.test.ts tests/unit/orchestrator-cli.test.ts tests/unit/orchestrator-terminal-messages.test.ts`, `bun run orchestrate:dry-run`, `bun run scripts/orchestrator.ts --workflow examples/mahilo/WORKFLOW.md --once --dry-run`, and `bun run scripts/orchestrator.ts --workflow examples/mahilo/WORKFLOW.plugin.md --once --dry-run`.
+
+Keep the standalone core focused while preserving the Mahilo usage history as an explicit example.
+
+**Acceptance Criteria**
+
+- [x] The archived Mahilo workflows and operator doc live under `examples/mahilo/`
+- [x] The archived Mahilo loop-ops skill is no longer active from the repo root
+- [x] Root package scripts expose only the standalone workflow defaults
+- [x] README changes are limited to path/context corrections required by the archive move

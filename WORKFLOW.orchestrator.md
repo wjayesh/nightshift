@@ -4,12 +4,11 @@ task_sources:
   - docs/tasks-standalone-orchestrator.md
 instruction_files:
   - docs/standalone-orchestrator-prd.md
-  - docs/autonomous-orchestrator.md
 decision_file: docs/decisions.md
 progress_file: .orchestrator/orchestrator-progress.md
 state_file: .orchestrator/orchestrator-state.json
 workspace_root: .orchestrator/orchestrator-workspaces
-workspace_mode: shared
+workspace_mode: git_worktree
 agent_command: codex
 agent_args:
   - exec
@@ -45,15 +44,15 @@ The standalone repo should explicitly preserve durable runtime artifacts, depend
 - Prefer repo-native files and conventions over external services or large frameworks.
 - Treat decision docs, progress/state artifacts, review cadence, and commit/push cadence as first-class product behaviors.
 - Update the configured decision doc when you make or revise a consequential implementation choice.
-- Update the task status in `docs/tasks-standalone-orchestrator.md` as the task moves forward.
 - Add concise progress notes to the task list section when useful.
 - Run the most relevant validation commands for the files you changed.
+- Treat `examples/mahilo/` as a historical example of how this orchestrator was used inside Mahilo, not the standalone source of truth for this repo.
 
 ## Task Completion Rules
 
-- Mark tasks `in-progress` when work begins.
-- Mark tasks `done` only when implementation and relevant validation are complete.
-- Mark tasks `blocked` only for a real unresolved dependency.
+- Do not edit the task status metadata directly; let the orchestrator record terminal `done` or `blocked` after successful integration.
+- Report terminal completion with `TASK_DONE <task-id>`.
+- Report terminal blockers with `TASK_BLOCKED <task-id>: <reason>`.
 - If all tracked tasks are done, say `COMPLETE`.
 
 ## Coordination Rules
